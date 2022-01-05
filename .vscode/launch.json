@@ -26,7 +26,10 @@
                 "filter": { "name": "tombdrive", "kind": "bin" }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "sourceMap": {
+                "/rustc/${env:RUST_COMMIT_HASH}/": "${env:RUST_TOOLCHAIN}/lib/rustlib/src/rust/"
+            }
         },
         {
             "type": "lldb",
@@ -37,7 +40,10 @@
                 "filter": { "name": "tombdrive", "kind": "bin" }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "sourceMap": {
+                "/rustc/${env:RUST_COMMIT_HASH}/": "${env:RUST_TOOLCHAIN}/lib/rustlib/src/rust/"
+            }
         }
     ]
 }
