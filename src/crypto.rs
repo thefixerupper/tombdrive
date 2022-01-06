@@ -29,7 +29,7 @@ use std::io::{ self, BufReader, ErrorKind, Read, Seek, SeekFrom };
 
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 /// The number of bytes in the [`MAGIC_NUMBER`]
 const MAGIC_NUMBER_LEN: usize = 4;
@@ -76,6 +76,50 @@ pub struct Attributes {
     salt: u128,
     /// The size of the plaintext data (i.e. unencrypted stream)
     size: u64,
+}
+
+
+impl Attributes {
+    ///
+    /// Creates a new [`Attributes`] struct based on the provided `stream`.
+    ///
+    pub fn from<T>(stream: T) -> io::Result<Attributes>
+    where T: Read + Seek {
+        let mut reader = BufReader::new(stream);
+        let mut hasher = Sha256::new();
+
+        let mut buffer = [0u8; 32];
+        let mut size = 0usize;
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    break;
+                }
+                Ok(n) => {
+                    hasher.update(buffer);
+                    size += n;
+                }
+                Err(error) => {
+                    if error.kind() != ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        let hash = hasher.finalize();
+
+        let mut counter_bytes = [0u8; COUNTER_LEN];
+        let mut salt_bytes = [0u8; SALT_LEN];
+
+        counter_bytes.copy_from_slice(&hash[..COUNTER_LEN]);
+        salt_bytes.copy_from_slice(&hash[COUNTER_LEN..]);
+
+        let counter = u128::from_be_bytes(counter_bytes);
+        let salt = u128::from_be_bytes(salt_bytes);
+        let size = size as u64;
+
+        Ok(Attributes { counter, salt, size })
+    }
 }
 
 
