@@ -80,7 +80,7 @@ impl Attributes {
     ///
     /// Creates a new [`Attributes`] struct based on the provided `stream`.
     ///
-    pub fn from<T: Read>(mut stream: T) -> io::Result<Attributes> {
+    pub fn from<T: Read>(stream: &mut T) -> io::Result<Attributes> {
         let mut hasher = Sha256::new();
 
         let mut buffer = [0u8; 32];
