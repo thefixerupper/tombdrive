@@ -70,7 +70,7 @@ pub struct Attributes {
     /// The counter used to encrypt the first block of data
     counter: u128,
     /// The salt used for key derivation
-    salt: u128,
+    salt: [u8; SALT_LEN],
     /// The size of the plaintext data (i.e. unencrypted stream)
     size: u64,
 }
@@ -104,13 +104,12 @@ impl Attributes {
         let hash = hasher.finalize();
 
         let mut counter_bytes = [0u8; COUNTER_LEN];
-        let mut salt_bytes = [0u8; SALT_LEN];
+        let mut salt = [0u8; SALT_LEN];
 
         counter_bytes.copy_from_slice(&hash[..COUNTER_LEN]);
-        salt_bytes.copy_from_slice(&hash[COUNTER_LEN..]);
+        salt.copy_from_slice(&hash[COUNTER_LEN..]);
 
         let counter = u128::from_be_bytes(counter_bytes);
-        let salt = u128::from_be_bytes(salt_bytes);
         let size = size as u64;
 
         Ok(Attributes { counter, salt, size })
@@ -150,14 +149,14 @@ impl<T: Read + Seek> DecryptionReader<T> {
         let mut magic_number = [0u8; MAGIC_NUMBER_LEN];
         let mut passphrase_hash = [0u8; PASSPHRASE_HASH_LEN];
         let mut size_bytes = [0u8; SIZE_LEN];
-        let mut salt_bytes = [0u8; SALT_LEN];
+        let mut salt = [0u8; SALT_LEN];
         let mut counter_bytes = [0u8; COUNTER_LEN];
 
         stream.seek(SeekFrom::Start(0))?;
         stream.read_exact(&mut magic_number)?;
         stream.read_exact(&mut passphrase_hash)?;
         stream.read_exact(&mut size_bytes)?;
-        stream.read_exact(&mut salt_bytes)?;
+        stream.read_exact(&mut salt)?;
         stream.read_exact(&mut counter_bytes)?;
 
         if magic_number != *MAGIC_NUMBER {
@@ -169,12 +168,10 @@ impl<T: Read + Seek> DecryptionReader<T> {
             return Err(io::Error::new(ErrorKind::InvalidData, "Wrong stream size"));
         }
 
-        let salt = u128::from_be_bytes(salt_bytes);
         let counter = u128::from_be_bytes(counter_bytes);
-
         let attributes = Attributes { counter, salt, size };
 
-        let (key, passphrase_hash_check) = derive_key(passphrase, &salt_bytes);
+        let (key, passphrase_hash_check) = derive_key(passphrase, &salt);
 
         if passphrase_hash != passphrase_hash_check {
             return Err(io::Error::new(ErrorKind::Other, "Wrong passphrase"));
