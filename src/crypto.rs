@@ -18,14 +18,11 @@
 //! Provides [`EncryptionReader<T>`] and [`DecryptionReader<T>`] types used
 //! to translate from and to the encrypted container format.
 //!
-//! These types behave akin to [`BufReader<R>`] (and actually use
-//! `BufReader<R>` internally more efficient access management).
-//!
 //! They transparently encrypt/decrypt data (as well as any associated
 //! attributes) from the backing stream.
 //!
 
-use std::io::{ self, BufReader, ErrorKind, Read, Seek, SeekFrom };
+use std::io::{ self, ErrorKind, Read, Seek, SeekFrom };
 
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
@@ -83,15 +80,13 @@ impl Attributes {
     ///
     /// Creates a new [`Attributes`] struct based on the provided `stream`.
     ///
-    pub fn from<T>(stream: T) -> io::Result<Attributes>
-    where T: Read + Seek {
-        let mut reader = BufReader::new(stream);
+    pub fn from<T: Read>(mut stream: T) -> io::Result<Attributes> {
         let mut hasher = Sha256::new();
 
         let mut buffer = [0u8; 32];
         let mut size = 0usize;
         loop {
-            match reader.read(&mut buffer) {
+            match stream.read(&mut buffer) {
                 Ok(0) => {
                     break;
                 }
@@ -131,13 +126,13 @@ impl Attributes {
 pub struct DecryptionReader<T: Read + Seek> {
     attributes: Attributes,
     key: [u8; KEY_LEN],
-    reader: BufReader<T>,
+    stream: T,
 }
 
 impl<T: Read + Seek> DecryptionReader<T> {
     ///
-    /// Create a new buffered [`DecryptionReader<T>`] that decrypts
-    /// an encrypted stream using `passphrase`.
+    /// Create a new [`DecryptionReader<T>`] that decrypts an encrypted
+    /// `stream` using `passphrase`.
     ///
     /// This function will return an [`io::Error`] if the `stream` is empty or
     /// if the `stream` does not look like it was encrypted using
@@ -151,7 +146,6 @@ impl<T: Read + Seek> DecryptionReader<T> {
         if total_len < HEADER_LEN {
             return Err(io::Error::new(ErrorKind::InvalidData, "Stream too short"));
         }
-        let mut reader = BufReader::new(stream);
 
         let mut magic_number = [0u8; MAGIC_NUMBER_LEN];
         let mut passphrase_hash = [0u8; PASSPHRASE_HASH_LEN];
@@ -159,12 +153,12 @@ impl<T: Read + Seek> DecryptionReader<T> {
         let mut salt_bytes = [0u8; SALT_LEN];
         let mut counter_bytes = [0u8; COUNTER_LEN];
 
-        reader.seek(SeekFrom::Start(0))?;
-        reader.read_exact(&mut magic_number)?;
-        reader.read_exact(&mut passphrase_hash)?;
-        reader.read_exact(&mut size_bytes)?;
-        reader.read_exact(&mut salt_bytes)?;
-        reader.read_exact(&mut counter_bytes)?;
+        stream.seek(SeekFrom::Start(0))?;
+        stream.read_exact(&mut magic_number)?;
+        stream.read_exact(&mut passphrase_hash)?;
+        stream.read_exact(&mut size_bytes)?;
+        stream.read_exact(&mut salt_bytes)?;
+        stream.read_exact(&mut counter_bytes)?;
 
         if magic_number != *MAGIC_NUMBER {
             return Err(io::Error::new(ErrorKind::InvalidData, "Wrong magic number"));
@@ -186,7 +180,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
             return Err(io::Error::new(ErrorKind::Other, "Wrong passphrase"));
         }
 
-        Ok(DecryptionReader { attributes, key, reader })
+        Ok(DecryptionReader { attributes, key, stream })
     }
 }
 
