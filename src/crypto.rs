@@ -62,10 +62,12 @@ const KEY_LEN: usize = 32;
 const KEY_ROUNDS: u32 = 1_000_000;
 
 
+///
 /// After the [`MAGIC_NUMBER`], each non-zero-size encrypted stream holds
 /// a couple of numerical attributes encrypted as big-endian bytes.
 /// [`Attributes`] hold the ones that we need to keep around while
 /// operating on the stream.
+///
 #[derive(Debug)]
 pub struct Attributes {
     /// The counter used to encrypt the first block of data
@@ -134,17 +136,32 @@ impl<T: Read + Seek> DecryptionReader<T> {
 
         let attributes = Attributes { counter, salt, size };
 
-        let mut key = [0u8; KEY_LEN];
-        pbkdf2::<Hmac<Sha256>>(passphrase.as_bytes(), &salt_bytes,
-                               KEY_ROUNDS, &mut key);
+        let (key, passphrase_hash_check) = derive_key(passphrase, &salt_bytes);
 
-        let mut passphrase_hash_check = [0u8; PASSPHRASE_HASH_LEN];
-        pbkdf2::<Hmac<Sha256>>(passphrase.as_bytes(), &salt_bytes,
-                               KEY_ROUNDS, &mut passphrase_hash_check);
         if passphrase_hash != passphrase_hash_check {
             return Err(io::Error::new(ErrorKind::Other, "Wrong passphrase"));
         }
 
         Ok(DecryptionReader { attributes, key, reader })
     }
+}
+
+
+///
+/// Returns a tuple of key and a passphrase hash (a small section at the head
+/// of an encrypted file used to quickly, and not perfectly, check if the
+/// provided passphrase is wrong).
+///
+fn derive_key(passphrase: &str, salt: &[u8])
+-> ([u8; KEY_LEN], [u8; PASSPHRASE_HASH_LEN]) {
+    let mut hash = [0u8; KEY_LEN + PASSPHRASE_HASH_LEN];
+    pbkdf2::<Hmac<Sha256>>(passphrase.as_bytes(), salt, KEY_ROUNDS, &mut hash);
+
+    let mut key = [0u8; KEY_LEN];
+    let mut pass_hash = [0u8; PASSPHRASE_HASH_LEN];
+
+    key.copy_from_slice(&hash[..KEY_LEN]);
+    pass_hash.copy_from_slice(&hash[KEY_LEN..]);
+
+    (key, pass_hash)
 }
