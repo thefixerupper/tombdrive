@@ -21,4 +21,6 @@ edition = "2021"
 
 [dependencies]
 aes = { version = "0.7", features = ["ctr"] }
-sha2 = "0.10"
+hmac = { version = "0.12", default_features = false }
+pbkdf2 = { version = "0.10", default_features = false }
+sha2 = { version = "0.10", default_features = false }

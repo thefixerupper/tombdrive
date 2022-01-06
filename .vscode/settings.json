@@ -16,6 +16,8 @@
 
 {
     "cSpell.words": [
+        "hmac",
+        "pbkdf2",
         "tombdrive",
     ]
 }
