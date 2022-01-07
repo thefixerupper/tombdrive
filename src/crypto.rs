@@ -48,9 +48,7 @@ const SALT_LEN: usize = 16;
 const SIZE_LEN: usize = 8;
 
 /// The number of bytes in the entire header (magic number + attributes)
-/// cast into `u64` to match the `seek()` return type and the size attribute
-const HEADER_LEN: u64 = (MAGIC_NUMBER_LEN + COUNTER_LEN +
-                         SALT_LEN + SIZE_LEN) as u64;
+const HEADER_LEN: usize = MAGIC_NUMBER_LEN + COUNTER_LEN + SALT_LEN + SIZE_LEN;
 
 /// The number of bytes in a key
 const KEY_LEN: usize = 32;
@@ -66,13 +64,13 @@ const KEY_ROUNDS: u32 = 1_000_000;
 /// operating on the stream.
 ///
 #[derive(Debug)]
-pub struct Attributes {
+struct Attributes {
     /// The counter used to encrypt the first block of data
-    counter: u128,
+    pub counter: u128,
     /// The salt used for key derivation
-    salt: [u8; SALT_LEN],
+    pub salt: [u8; SALT_LEN],
     /// The size of the plaintext data (i.e. unencrypted stream)
-    size: u64,
+    pub size: u64,
 }
 
 
@@ -118,7 +116,59 @@ impl Attributes {
 
 
 ///
-/// The [`DecryptionReader<T>`] creates a translation layer where the encrypted
+/// The [`EncryptionReader<T>`] creates a translation layer where plaintext
+/// data from the backing stream gets encrypted on the fly as it is being read.
+///
+#[derive(Debug)]
+pub struct EncryptionReader<T: Read + Seek> {
+    attributes: Attributes,
+    header: [u8; HEADER_LEN],
+    key: [u8; KEY_LEN],
+    stream: T,
+}
+
+impl<T: Read + Seek> EncryptionReader<T> {
+    ///
+    /// Create a new [`EncryptionReader<T>`] that encrypts a plaintext
+    /// `stream` using `passphrase`.
+    ///
+    /// This function will return an [`io::Error`] if the `stream` is empty.
+    ///
+    /// The encrypted data is then readable by [`DecryptionReader`].
+    ///
+    pub fn new(mut stream: T, passphrase: &str) -> io::Result<EncryptionReader<T>> {
+        let total_len = stream.seek(SeekFrom::End(0))?;
+        if total_len == 0  {
+            return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
+        }
+        let attributes = Attributes::from(&mut stream)?;
+
+        let (key, passphrase_hash) = derive_key(passphrase, &attributes.salt);
+
+        let mut header = [0u8; HEADER_LEN];
+
+        let (start, end) = (0usize, MAGIC_NUMBER_LEN);
+        header[start..end].copy_from_slice(MAGIC_NUMBER);
+
+        let (start, end) = (end, end + PASSPHRASE_HASH_LEN);
+        header[start..end].copy_from_slice(&passphrase_hash);
+
+        let (start, end) = (end, end + SIZE_LEN);
+        header[start..end].copy_from_slice(&attributes.size.to_be_bytes());
+
+        let (start, end) = (end, end + SALT_LEN);
+        header[start..end].copy_from_slice(&attributes.salt);
+
+        let (start, end) = (end, end + COUNTER_LEN);
+        header[start..end].copy_from_slice(&attributes.counter.to_be_bytes());
+
+        Ok(EncryptionReader { attributes, header, key, stream })
+    }
+}
+
+
+///
+/// The [`DecryptionReader<T>`] creates a translation layer where encrypted
 /// data from the backing stream gets decrypted on the fly as it is being read.
 ///
 #[derive(Debug)]
@@ -142,7 +192,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
         if total_len == 0 {
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
         }
-        if total_len < HEADER_LEN {
+        if total_len < HEADER_LEN as u64 {
             return Err(io::Error::new(ErrorKind::InvalidData, "Stream too short"));
         }
 
@@ -164,7 +214,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
         }
 
         let size = u64::from_be_bytes(size_bytes);
-        if size + HEADER_LEN != total_len {
+        if size + HEADER_LEN as u64 != total_len {
             return Err(io::Error::new(ErrorKind::InvalidData, "Wrong stream size"));
         }
 
