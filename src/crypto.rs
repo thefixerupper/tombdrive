@@ -28,6 +28,8 @@ use hmac::Hmac;
 use pbkdf2::pbkdf2;
 use sha2::{Digest, Sha256};
 
+use crate::buffer::Buffer;
+
 /// The number of bytes in the [`MAGIC_NUMBER`]
 const MAGIC_NUMBER_LEN: usize = 4;
 
@@ -78,7 +80,7 @@ impl Attributes {
     ///
     /// Creates a new [`Attributes`] struct based on the provided `stream`.
     ///
-    pub fn from<T: Read>(stream: &mut T) -> io::Result<Attributes> {
+    pub fn from<T: Read + Seek>(stream: &mut Buffer<T>) -> io::Result<Attributes> {
         let mut hasher = Sha256::new();
 
         let mut buffer = [0u8; 32];
@@ -124,7 +126,7 @@ pub struct EncryptionReader<T: Read + Seek> {
     attributes: Attributes,
     header: [u8; HEADER_LEN],
     key: [u8; KEY_LEN],
-    stream: T,
+    stream: Buffer<T>,
 }
 
 impl<T: Read + Seek> EncryptionReader<T> {
@@ -136,7 +138,8 @@ impl<T: Read + Seek> EncryptionReader<T> {
     ///
     /// The encrypted data is then readable by [`DecryptionReader`].
     ///
-    pub fn new(mut stream: T, passphrase: &str) -> io::Result<EncryptionReader<T>> {
+    pub fn new(mut stream: Buffer<T>, passphrase: &str)
+    -> io::Result<EncryptionReader<T>> {
         let total_len = stream.seek(SeekFrom::End(0))?;
         if total_len == 0  {
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
@@ -175,7 +178,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
 pub struct DecryptionReader<T: Read + Seek> {
     attributes: Attributes,
     key: [u8; KEY_LEN],
-    stream: T,
+    stream: Buffer<T>,
 }
 
 impl<T: Read + Seek> DecryptionReader<T> {
@@ -187,7 +190,8 @@ impl<T: Read + Seek> DecryptionReader<T> {
     /// if the `stream` does not look like it was encrypted using
     /// [`EncryptionReader<T>`].
     ///
-    pub fn new(mut stream: T, passphrase: &str) -> io::Result<DecryptionReader<T>> {
+    pub fn new(mut stream: Buffer<T>, passphrase: &str)
+    -> io::Result<DecryptionReader<T>> {
         let total_len = stream.seek(SeekFrom::End(0))?;
         if total_len == 0 {
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
