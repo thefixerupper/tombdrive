@@ -26,29 +26,53 @@ use std::io::{ self, BufReader, ErrorKind, Read, Seek, SeekFrom };
 ///
 #[derive(Debug)]
 pub struct Buffer<T: Read + Seek> {
-    cursor: u64,
+    cursor: usize,
     reader: BufReader<T>,
-    len: u64,
+    len: usize,
 }
 
 impl<T: Read + Seek> Buffer<T> {
     ///
     /// Return the length of the underlying stream (as last checked).
     ///
-    pub fn len(self) -> u64 {
+    pub fn len(&self) -> usize {
         self.len
     }
 
     ///
     /// Recalculate the length of the stream that the `Buffer` operates on.
     ///
-    pub fn reset(&mut self) -> io::Result<u64> {
+    pub fn reset(&mut self) -> io::Result<usize> {
         let current = self.reader.stream_position()?;
-        self.len = self.reader.seek(SeekFrom::End(0))?;
+        let len = self.reader.seek(SeekFrom::End(0))? as usize;
+        if len > i64::MAX as usize {
+            return Err(io::Error::new(ErrorKind::Other, "File too large"));
+        }
+        self.len = len;
         self.reader.seek(SeekFrom::Start(current))?;
         Ok(self.len)
     }
 
+    ///
+    /// Seek to a new cursor position, preserving the buffer if possible.
+    ///
+    pub fn seek_from_start(&mut self, offset: usize) -> io::Result<()> {
+        let new_cursor = match self.cursor.checked_add(offset) {
+            Some(val) => val,
+            None => return Err(io::Error::new(ErrorKind::InvalidInput,
+                                              "Out of bounds (1)")),
+        };
+
+        if new_cursor > i64::MAX as usize {
+            return Err(io::Error::new(ErrorKind::InvalidInput,
+                                      "Out of bounds (2)"));
+        }
+
+        let offset = new_cursor as i64 - self.cursor as i64;
+        self.reader.seek_relative(offset)?;
+        self.cursor = new_cursor;
+        Ok(())
+    }
 
     ///
     /// Create a new [`Buffer`] from the supplied `stream` with `capacity`
@@ -71,50 +95,9 @@ impl<T: Read + Seek> Buffer<T> {
 impl<T: Read + Seek> Read for Buffer<T> {
     ///
     /// Read some data from the underlying stream. For more details see
-    /// [`BufReader`].
+    /// [`Read`].
     ///
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.reader.read(buffer)
-    }
-}
-
-impl<T: Read + Seek> Seek for Buffer<T> {
-    ///
-    /// Seek to a new cursor position, preserving the buffer if possible.
-    ///
-    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-        let (base, offset): (u64, i64) = match position {
-            SeekFrom::Start(pos) => {
-                if pos > i64::MAX as u64 {
-                    return Err(io::Error::new(ErrorKind::InvalidInput,
-                                              "Out of bounds seeking (1)"))
-                } else {
-                    (0, pos as i64)
-                }
-            }
-            SeekFrom::Current(pos) => {
-                (self.cursor, pos)
-            }
-            SeekFrom::End(pos) => {
-                (self.len, pos)
-            }
-        };
-        let new_cursor = if offset < 0 {
-            base.checked_sub((-offset) as u64)
-        } else {
-            base.checked_add(offset as u64)
-        };
-        let new_cursor = match new_cursor {
-            Some(val) => val,
-            None => return Err(io::Error::new(ErrorKind::InvalidInput,
-                                              "Out of bounds seeking (2)")),
-        };
-        if new_cursor > i64::MAX as u64 {
-            return Err(io::Error::new(ErrorKind::InvalidInput,
-                                      "Out of bounds seeking (3)"));
-        }
-        let new_offset = new_cursor as i64 - self.cursor as i64;
-        self.reader.seek_relative(new_offset)?;
-        Ok(new_cursor)
     }
 }

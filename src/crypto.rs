@@ -30,6 +30,9 @@ use sha2::{Digest, Sha256};
 
 use crate::buffer::Buffer;
 
+/// The size of each individual block used by the cipher
+const BLOCK_LEN: usize = 16;
+
 /// The number of bytes in the [`MAGIC_NUMBER`]
 const MAGIC_NUMBER_LEN: usize = 4;
 
@@ -41,7 +44,7 @@ const MAGIC_NUMBER: &[u8; MAGIC_NUMBER_LEN] = b"Tomb";
 const PASSPHRASE_HASH_LEN: usize = 4;
 
 /// The number of bytes in the counter attribute
-const COUNTER_LEN: usize = 16;
+const COUNTER_LEN: usize = BLOCK_LEN;
 
 /// The number of bytes in the salt attribute
 const SALT_LEN: usize = 16;
@@ -72,15 +75,15 @@ struct Attributes {
     /// The salt used for key derivation
     pub salt: [u8; SALT_LEN],
     /// The size of the plaintext data (i.e. unencrypted stream)
-    pub size: u64,
+    pub size: usize,
 }
-
 
 impl Attributes {
     ///
     /// Creates a new [`Attributes`] struct based on the provided `stream`.
     ///
     pub fn from<T: Read + Seek>(stream: &mut Buffer<T>) -> io::Result<Attributes> {
+        stream.seek_from_start(0)?;
         let mut hasher = Sha256::new();
 
         let mut buffer = [0u8; 32];
@@ -110,7 +113,6 @@ impl Attributes {
         salt.copy_from_slice(&hash[COUNTER_LEN..]);
 
         let counter = u128::from_be_bytes(counter_bytes);
-        let size = size as u64;
 
         Ok(Attributes { counter, salt, size })
     }
@@ -140,11 +142,13 @@ impl<T: Read + Seek> EncryptionReader<T> {
     ///
     pub fn new(mut stream: Buffer<T>, passphrase: &str)
     -> io::Result<EncryptionReader<T>> {
-        let total_len = stream.seek(SeekFrom::End(0))?;
-        if total_len == 0  {
+        let total_len = stream.len();
+        if total_len == 0 {
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
         }
+
         let attributes = Attributes::from(&mut stream)?;
+        stream.seek_from_start(0)?;
 
         let (key, passphrase_hash) = derive_key(passphrase, &attributes.salt);
 
@@ -157,7 +161,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
         header[start..end].copy_from_slice(&passphrase_hash);
 
         let (start, end) = (end, end + SIZE_LEN);
-        header[start..end].copy_from_slice(&attributes.size.to_be_bytes());
+        header[start..end].copy_from_slice(&(attributes.size as u64).to_be_bytes());
 
         let (start, end) = (end, end + SALT_LEN);
         header[start..end].copy_from_slice(&attributes.salt);
@@ -166,6 +170,10 @@ impl<T: Read + Seek> EncryptionReader<T> {
         header[start..end].copy_from_slice(&attributes.counter.to_be_bytes());
 
         Ok(EncryptionReader { attributes, header, key, stream })
+    }
+
+    pub fn len(self) -> usize {
+        self.attributes.size + HEADER_LEN
     }
 }
 
@@ -192,11 +200,11 @@ impl<T: Read + Seek> DecryptionReader<T> {
     ///
     pub fn new(mut stream: Buffer<T>, passphrase: &str)
     -> io::Result<DecryptionReader<T>> {
-        let total_len = stream.seek(SeekFrom::End(0))?;
+        let total_len = stream.len();
         if total_len == 0 {
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
         }
-        if total_len < HEADER_LEN as u64 {
+        if total_len < HEADER_LEN {
             return Err(io::Error::new(ErrorKind::InvalidData, "Stream too short"));
         }
 
@@ -206,7 +214,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
         let mut salt = [0u8; SALT_LEN];
         let mut counter_bytes = [0u8; COUNTER_LEN];
 
-        stream.seek(SeekFrom::Start(0))?;
+        stream.seek_from_start(0)?;
         stream.read_exact(&mut magic_number)?;
         stream.read_exact(&mut passphrase_hash)?;
         stream.read_exact(&mut size_bytes)?;
@@ -217,8 +225,8 @@ impl<T: Read + Seek> DecryptionReader<T> {
             return Err(io::Error::new(ErrorKind::InvalidData, "Wrong magic number"));
         }
 
-        let size = u64::from_be_bytes(size_bytes);
-        if size + HEADER_LEN as u64 != total_len {
+        let size = u64::from_be_bytes(size_bytes) as usize;
+        if size + HEADER_LEN != total_len {
             return Err(io::Error::new(ErrorKind::InvalidData, "Wrong stream size"));
         }
 
