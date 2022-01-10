@@ -44,10 +44,10 @@ const SALT_LEN: usize = 16;
 const HEADER_LEN: usize = COUNTER_LEN + SALT_LEN;
 
 /// The number of bytes in a key
-const KEY_LEN: usize = 32;
+const KEY_LEN: usize = 16;
 
 /// The number of derivation rounds
-const KEY_ROUNDS: u32 = 1_000_000;
+const KEY_ROUNDS: u32 = 10_000;
 
 // The maximum number of bytes to work on per encryption/decryption iteration
 const MAX_BYTES_PER_READ: usize = 4096;
@@ -130,7 +130,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
     /// The encrypted data is then readable by [`DecryptionReader`].
     ///
     pub fn new(mut stream: Buffer<T>, passphrase: &str)
-    -> io::Result<EncryptionReader<T>> {
+               -> io::Result<EncryptionReader<T>> {
         let total_len = stream.len();
         if total_len == 0 {
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
@@ -170,6 +170,8 @@ impl<T: Read + Seek> EncryptionReader<T> {
 
 impl<T: Read + Seek> Read for EncryptionReader<T> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        dbg!("enc read");
+
         // if no `out` or we're past the end of file, return 0
         if out.len() == 0 || self.cursor >= self.len() {
             return Ok(0);
@@ -190,7 +192,7 @@ impl<T: Read + Seek> Read for EncryptionReader<T> {
         }
 
         let stream_cursor = self.cursor - HEADER_LEN;
-        let bytes_copied = xor_stream(stream_cursor, self.attributes.counter,
+        let bytes_copied = xor_stream(0, stream_cursor, self.attributes.counter,
                                       &self.key, &mut self.stream, out)?;
         self.cursor += bytes_copied;
         Ok(bytes_copied)
@@ -220,7 +222,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
     /// [`EncryptionReader<T>`].
     ///
     pub fn new(mut stream: Buffer<T>, passphrase: &str)
-    -> io::Result<DecryptionReader<T>> {
+               -> io::Result<DecryptionReader<T>> {
         let total_len = stream.len();
         if total_len == 0 {
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
@@ -240,7 +242,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
         let attributes = Attributes { counter, salt };
         let key = derive_key(passphrase, &salt);
 
-        Ok(DecryptionReader { attributes, cursor: HEADER_LEN, key, stream })
+        Ok(DecryptionReader { attributes, cursor: 0, key, stream })
     }
 
     ///
@@ -261,13 +263,15 @@ impl<T: Read + Seek> DecryptionReader<T> {
 
 impl<T: Read + Seek> Read for DecryptionReader<T> {
     fn read(&mut self, out: &mut[u8]) -> io::Result<usize> {
+        dbg!("dec read");
         // if no `out` or we are past the length of file, return 0
         if out.len() == 0 || self.cursor >= self.len() {
             return Ok(0);
         }
 
         let stream_cursor = self.cursor + HEADER_LEN;
-        let bytes_copied = xor_stream(stream_cursor, self.attributes.counter,
+        let bytes_copied = xor_stream(HEADER_LEN, stream_cursor,
+                                      self.attributes.counter,
                                       &self.key, &mut self.stream, out)?;
         self.cursor += bytes_copied;
         Ok(bytes_copied)
@@ -302,9 +306,10 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; KEY_LEN] {
 }
 
 
-fn xor_stream<T: Read + Seek>(cursor: usize, base_counter: u128,
-                              key: &[u8], stream: &mut Buffer<T>,
-                              out: &mut [u8]) -> io::Result<usize> {
+fn xor_stream<T: Read + Seek>(base_offset: usize, cursor: usize,
+                              base_counter: u128,  key: &[u8],
+                              stream: &mut Buffer<T>, out: &mut [u8])
+                              -> io::Result<usize> {
     // align the position in the stream
     let aligned_cursor = align_to_block(cursor);
     let first_block_offset = cursor - aligned_cursor;
@@ -312,7 +317,7 @@ fn xor_stream<T: Read + Seek>(cursor: usize, base_counter: u128,
     stream.seek_from_start(aligned_cursor)?;
 
     // counter
-    let block_number = aligned_cursor / BLOCK_LEN;
+    let block_number = (aligned_cursor - base_offset) / BLOCK_LEN;
     let counter = base_counter.wrapping_add(block_number as u128);
     let counter_bytes = counter.to_be_bytes();
 
@@ -352,4 +357,87 @@ fn xor_stream<T: Read + Seek>(cursor: usize, base_counter: u128,
     cipher.apply_keystream(out_slice);
 
     Ok(bytes_to_copy)
+}
+
+
+#[cfg(test)]
+pub mod tests {
+    use io::Cursor;
+
+    use super::*;
+
+    const PLAINTEXT: &[u8] = concat!(
+        "It was a bright cold day in April, and the clocks were striking ",
+        "thirteen. Winston Smith, his chin nuzzled into his breast in an ",
+        "effort to escape the vile wind, slipped quickly through the glass ",
+        "doors of Victory Mansions, though not quickly enough to prevent a ",
+        "swirl of gritty dust from entering along with him."
+    ).as_bytes();
+
+    const PASSPHRASE: &str = "1984";
+
+    fn encrypt(plaintext: &[u8], passphrase: &str) -> Vec<u8> {
+        let plain_file = Cursor::new(plaintext);
+        let plain_stream = Buffer::with_capacity(plaintext.len() + HEADER_LEN,
+                                                 plain_file).unwrap();
+        let mut enc_reader = EncryptionReader::new(plain_stream, passphrase)
+                             .unwrap();
+        let mut ciphertext: Vec<u8> = Vec::with_capacity(enc_reader.len());
+        enc_reader.read_to_end(&mut ciphertext).unwrap();
+        ciphertext
+    }
+
+    fn decrypt(ciphertext: &[u8], passphrase: &str) -> Vec<u8> {
+        let cipher_file = Cursor::new(&ciphertext);
+        let cipher_stream = Buffer::with_capacity(ciphertext.len() - HEADER_LEN,
+                                                  cipher_file).unwrap();
+        let mut dec_reader = DecryptionReader::new(cipher_stream, passphrase)
+                             .unwrap();
+        let mut plaintext: Vec<u8> = Vec::with_capacity(PLAINTEXT.len());
+        dec_reader.read_to_end(&mut plaintext).unwrap();
+        plaintext
+    }
+
+    ///
+    /// Test if encrypting the entire stream and then decrypting the entire
+    /// restores the original contents.
+    ///
+    #[test]
+    fn encryption_round_trip() {
+        let ciphertext = encrypt(PLAINTEXT, PASSPHRASE);
+        let plaintext = decrypt(&ciphertext, PASSPHRASE);
+        assert_eq!(&plaintext[..], PLAINTEXT);
+    }
+
+    ///
+    /// Test the parity between extracting just a small part of the stream,
+    /// and the entire content.
+    ///
+    #[test]
+    fn partial_encryption() {
+        let ciphertext = encrypt(PLAINTEXT, PASSPHRASE);
+
+        let plain_file = Cursor::new(PLAINTEXT);
+        let plain_stream = Buffer::with_capacity(PLAINTEXT.len() + HEADER_LEN,
+                                                 plain_file).unwrap();
+        let mut enc_reader = EncryptionReader::new(plain_stream, PASSPHRASE)
+                             .unwrap();
+
+        // test equality when looking at corresponding sections
+        let inputs = [(15, 43), (100, 20), (128,1), (64, 32)];
+        for i in inputs {
+            let mut ctxt = vec![0u8; i.1];
+            enc_reader.seek_from_start(i.0);
+            enc_reader.read_exact(&mut ctxt).unwrap();
+            assert_eq!(&ctxt[..], &ciphertext[i.0..(i.0 + i.1)]);
+        }
+
+        // sanity check of expected non-equality
+        for i in inputs {
+            let mut ctxt = vec![0u8; i.1];
+            enc_reader.seek_from_start(i.0 + 1); // <- this should break it
+            enc_reader.read_exact(&mut ctxt).unwrap();
+            assert_ne!(&ctxt[..], &ciphertext[i.0..(i.0 + i.1)]);
+        }
+    }
 }
