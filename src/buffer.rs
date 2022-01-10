@@ -57,20 +57,15 @@ impl<T: Read + Seek> Buffer<T> {
     /// Seek to a new cursor position, preserving the buffer if possible.
     ///
     pub fn seek_from_start(&mut self, offset: usize) -> io::Result<()> {
-        let new_cursor = match self.cursor.checked_add(offset) {
-            Some(val) => val,
-            None => return Err(io::Error::new(ErrorKind::InvalidInput,
-                                              "Out of bounds (1)")),
-        };
 
-        if new_cursor > i64::MAX as usize {
+        if offset > i64::MAX as usize {
             return Err(io::Error::new(ErrorKind::InvalidInput,
-                                      "Out of bounds (2)"));
+                                      "Offset out of bounds"));
         }
 
-        let offset = new_cursor as i64 - self.cursor as i64;
-        self.reader.seek_relative(offset)?;
-        self.cursor = new_cursor;
+        let rel_offset = offset as i64 - dbg!(self.cursor) as i64;
+        self.reader.seek_relative(dbg!(rel_offset))?;
+        self.cursor = offset;
         Ok(())
     }
 
@@ -98,6 +93,8 @@ impl<T: Read + Seek> Read for Buffer<T> {
     /// [`Read`].
     ///
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.reader.read(buffer)
+        let bytes_read = self.reader.read(buffer)?;
+        self.cursor += bytes_read;
+        Ok(bytes_read)
     }
 }
