@@ -170,8 +170,6 @@ impl<T: Read + Seek> EncryptionReader<T> {
 
 impl<T: Read + Seek> Read for EncryptionReader<T> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        dbg!("enc read");
-
         // if no `out` or we're past the end of file, return 0
         if out.len() == 0 || self.cursor >= self.len() {
             return Ok(0);
@@ -263,7 +261,6 @@ impl<T: Read + Seek> DecryptionReader<T> {
 
 impl<T: Read + Seek> Read for DecryptionReader<T> {
     fn read(&mut self, out: &mut[u8]) -> io::Result<usize> {
-        dbg!("dec read");
         // if no `out` or we are past the length of file, return 0
         if out.len() == 0 || self.cursor >= self.len() {
             return Ok(0);
@@ -426,18 +423,18 @@ pub mod tests {
         // test equality when looking at corresponding sections
         let inputs = [(15, 43), (100, 20), (128,1), (64, 32)];
         for i in inputs {
-            let mut ctxt = vec![0u8; i.1];
+            let mut part = vec![0u8; i.1];
             enc_reader.seek_from_start(i.0);
-            enc_reader.read_exact(&mut ctxt).unwrap();
-            assert_eq!(&ctxt[..], &ciphertext[i.0..(i.0 + i.1)]);
+            enc_reader.read_exact(&mut part).unwrap();
+            assert_eq!(&part[..], &ciphertext[i.0..(i.0 + i.1)]);
         }
 
         // sanity check of expected non-equality
         for i in inputs {
-            let mut ctxt = vec![0u8; i.1];
+            let mut part = vec![0u8; i.1];
             enc_reader.seek_from_start(i.0 + 1); // <- this should break it
-            enc_reader.read_exact(&mut ctxt).unwrap();
-            assert_ne!(&ctxt[..], &ciphertext[i.0..(i.0 + i.1)]);
+            enc_reader.read_exact(&mut part).unwrap();
+            assert_ne!(&part[..], &ciphertext[i.0..(i.0 + i.1)]);
         }
     }
 }

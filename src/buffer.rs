@@ -63,8 +63,8 @@ impl<T: Read + Seek> Buffer<T> {
                                       "Offset out of bounds"));
         }
 
-        let rel_offset = offset as i64 - dbg!(self.cursor) as i64;
-        self.reader.seek_relative(dbg!(rel_offset))?;
+        let rel_offset = offset as i64 - self.cursor as i64;
+        self.reader.seek_relative(rel_offset)?;
         self.cursor = offset;
         Ok(())
     }
