@@ -17,6 +17,8 @@
 {
     "cSpell.words": [
         "hmac",
+        "mountpoint",
+        "passfile",
         "pbkdf2",
         "tombdrive",
     ]
