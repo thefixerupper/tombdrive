@@ -22,26 +22,17 @@
 //! attributes) from the backing stream.
 //!
 
-use std::io::{ self, ErrorKind, Read, Seek, SeekFrom };
+use std::io::{ self, ErrorKind, Read, Seek };
 
+use aes::{Aes128Ctr, BLOCK_SIZE as BLOCK_LEN};
+use aes::cipher::{NewCipher, StreamCipher};
+use aes::cipher::generic_array::GenericArray;
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
 use sha2::{Digest, Sha256};
 
 use crate::buffer::Buffer;
 
-/// The size of each individual block used by the cipher
-const BLOCK_LEN: usize = 16;
-
-/// The number of bytes in the [`MAGIC_NUMBER`]
-const MAGIC_NUMBER_LEN: usize = 4;
-
-/// Magic bytes that are added to the beginning of every encrypted stream
-const MAGIC_NUMBER: &[u8; MAGIC_NUMBER_LEN] = b"Tomb";
-
-/// The number of bytes used by [`DecryptionReader<T>`] to quickly check
-/// for invalid passphrases
-const PASSPHRASE_HASH_LEN: usize = 4;
 
 /// The number of bytes in the counter attribute
 const COUNTER_LEN: usize = BLOCK_LEN;
@@ -49,17 +40,17 @@ const COUNTER_LEN: usize = BLOCK_LEN;
 /// The number of bytes in the salt attribute
 const SALT_LEN: usize = 16;
 
-/// The number of bytes representing the size of the plaintext
-const SIZE_LEN: usize = 8;
-
-/// The number of bytes in the entire header (magic number + attributes)
-const HEADER_LEN: usize = MAGIC_NUMBER_LEN + COUNTER_LEN + SALT_LEN + SIZE_LEN;
+/// The number of bytes in the entire header
+const HEADER_LEN: usize = COUNTER_LEN + SALT_LEN;
 
 /// The number of bytes in a key
 const KEY_LEN: usize = 32;
 
 /// The number of derivation rounds
 const KEY_ROUNDS: u32 = 1_000_000;
+
+// The maximum number of bytes to work on per encryption/decryption iteration
+const MAX_BYTES_PER_READ: usize = 4096;
 
 
 ///
@@ -74,8 +65,6 @@ struct Attributes {
     pub counter: u128,
     /// The salt used for key derivation
     pub salt: [u8; SALT_LEN],
-    /// The size of the plaintext data (i.e. unencrypted stream)
-    pub size: usize,
 }
 
 impl Attributes {
@@ -87,15 +76,14 @@ impl Attributes {
         let mut hasher = Sha256::new();
 
         let mut buffer = [0u8; 32];
-        let mut size = 0usize;
         loop {
             match stream.read(&mut buffer) {
                 Ok(0) => {
                     break;
                 }
                 Ok(n) => {
-                    hasher.update(buffer);
-                    size += n;
+                    let buffer_slice = &buffer[..n];
+                    hasher.update(buffer_slice);
                 }
                 Err(error) => {
                     if error.kind() != ErrorKind::Interrupted {
@@ -114,7 +102,7 @@ impl Attributes {
 
         let counter = u128::from_be_bytes(counter_bytes);
 
-        Ok(Attributes { counter, salt, size })
+        Ok(Attributes { counter, salt })
     }
 }
 
@@ -126,6 +114,7 @@ impl Attributes {
 #[derive(Debug)]
 pub struct EncryptionReader<T: Read + Seek> {
     attributes: Attributes,
+    cursor: usize,
     header: [u8; HEADER_LEN],
     key: [u8; KEY_LEN],
     stream: Buffer<T>,
@@ -150,30 +139,61 @@ impl<T: Read + Seek> EncryptionReader<T> {
         let attributes = Attributes::from(&mut stream)?;
         stream.seek_from_start(0)?;
 
-        let (key, passphrase_hash) = derive_key(passphrase, &attributes.salt);
+        let key = derive_key(passphrase, &attributes.salt);
 
         let mut header = [0u8; HEADER_LEN];
 
-        let (start, end) = (0usize, MAGIC_NUMBER_LEN);
-        header[start..end].copy_from_slice(MAGIC_NUMBER);
-
-        let (start, end) = (end, end + PASSPHRASE_HASH_LEN);
-        header[start..end].copy_from_slice(&passphrase_hash);
-
-        let (start, end) = (end, end + SIZE_LEN);
-        header[start..end].copy_from_slice(&(attributes.size as u64).to_be_bytes());
-
-        let (start, end) = (end, end + SALT_LEN);
+        let (start, end) = (0usize, SALT_LEN);
         header[start..end].copy_from_slice(&attributes.salt);
 
         let (start, end) = (end, end + COUNTER_LEN);
         header[start..end].copy_from_slice(&attributes.counter.to_be_bytes());
 
-        Ok(EncryptionReader { attributes, header, key, stream })
+        Ok(EncryptionReader { attributes, cursor: 0, header, key, stream })
     }
 
-    pub fn len(self) -> usize {
-        self.attributes.size + HEADER_LEN
+    ///
+    /// Returns total encrypted length.
+    ///
+    pub fn len(&self) -> usize {
+        self.stream.len() + HEADER_LEN
+    }
+
+    ///
+    /// Seek to a new cursor position.
+    ///
+    pub fn seek_from_start(&mut self, offset: usize) {
+        self.cursor = offset;
+       // the actual stream seeking happens in the read method when needed
+    }
+}
+
+impl<T: Read + Seek> Read for EncryptionReader<T> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        // if no `out` or we're past the end of file, return 0
+        if out.len() == 0 || self.cursor >= self.len() {
+            return Ok(0);
+        }
+
+        // if we're in the header area, read at most to the end of the header
+        if self.cursor < HEADER_LEN {
+            let header_remaining = HEADER_LEN - self.cursor;
+            let bytes_to_copy = header_remaining.min(out.len());
+
+            let header_slice_end = self.cursor + bytes_to_copy;
+            let header_slice = &self.header[self.cursor..header_slice_end];
+
+            out[..bytes_to_copy].copy_from_slice(header_slice);
+
+            self.cursor = header_slice_end;
+            return Ok(bytes_to_copy);
+        }
+
+        let stream_cursor = self.cursor - HEADER_LEN;
+        let bytes_copied = xor_stream(stream_cursor, self.attributes.counter,
+                                      &self.key, &mut self.stream, out)?;
+        self.cursor += bytes_copied;
+        Ok(bytes_copied)
     }
 }
 
@@ -185,6 +205,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
 #[derive(Debug)]
 pub struct DecryptionReader<T: Read + Seek> {
     attributes: Attributes,
+    cursor: usize,
     key: [u8; KEY_LEN],
     stream: Buffer<T>,
 }
@@ -208,57 +229,127 @@ impl<T: Read + Seek> DecryptionReader<T> {
             return Err(io::Error::new(ErrorKind::InvalidData, "Stream too short"));
         }
 
-        let mut magic_number = [0u8; MAGIC_NUMBER_LEN];
-        let mut passphrase_hash = [0u8; PASSPHRASE_HASH_LEN];
-        let mut size_bytes = [0u8; SIZE_LEN];
         let mut salt = [0u8; SALT_LEN];
         let mut counter_bytes = [0u8; COUNTER_LEN];
 
         stream.seek_from_start(0)?;
-        stream.read_exact(&mut magic_number)?;
-        stream.read_exact(&mut passphrase_hash)?;
-        stream.read_exact(&mut size_bytes)?;
         stream.read_exact(&mut salt)?;
         stream.read_exact(&mut counter_bytes)?;
 
-        if magic_number != *MAGIC_NUMBER {
-            return Err(io::Error::new(ErrorKind::InvalidData, "Wrong magic number"));
-        }
-
-        let size = u64::from_be_bytes(size_bytes) as usize;
-        if size + HEADER_LEN != total_len {
-            return Err(io::Error::new(ErrorKind::InvalidData, "Wrong stream size"));
-        }
-
         let counter = u128::from_be_bytes(counter_bytes);
-        let attributes = Attributes { counter, salt, size };
+        let attributes = Attributes { counter, salt };
+        let key = derive_key(passphrase, &salt);
 
-        let (key, passphrase_hash_check) = derive_key(passphrase, &salt);
+        Ok(DecryptionReader { attributes, cursor: HEADER_LEN, key, stream })
+    }
 
-        if passphrase_hash != passphrase_hash_check {
-            return Err(io::Error::new(ErrorKind::Other, "Wrong passphrase"));
-        }
+    ///
+    /// Returns total decrypted length.
+    ///
+    pub fn len(&self) -> usize {
+        self.stream.len() - HEADER_LEN
+    }
 
-        Ok(DecryptionReader { attributes, key, stream })
+    ///
+    /// Seek to a new cursor position.
+    ///
+    pub fn seek_from_start(&mut self, offset: usize) {
+        self.cursor = offset;
+        // the actual stream seeking happens in the read method when needed
     }
 }
 
+impl<T: Read + Seek> Read for DecryptionReader<T> {
+    fn read(&mut self, out: &mut[u8]) -> io::Result<usize> {
+        // if no `out` or we are past the length of file, return 0
+        if out.len() == 0 || self.cursor >= self.len() {
+            return Ok(0);
+        }
+
+        let stream_cursor = self.cursor + HEADER_LEN;
+        let bytes_copied = xor_stream(stream_cursor, self.attributes.counter,
+                                      &self.key, &mut self.stream, out)?;
+        self.cursor += bytes_copied;
+        Ok(bytes_copied)
+    }
+}
+
+
+///
+/// Align `cursor` to block boundaries.
+///
+fn align_to_block(cursor: usize) -> usize {
+    assert_eq!(HEADER_LEN % BLOCK_LEN, 0, "Header must be block-aligned");
+
+    if cursor % BLOCK_LEN == 0 {
+        return cursor;
+    }
+
+    cursor - (cursor % BLOCK_LEN)
+}
 
 ///
 /// Returns a tuple of key and a passphrase hash (a small section at the head
 /// of an encrypted file used to quickly, and not perfectly, check if the
 /// provided passphrase is wrong).
 ///
-fn derive_key(passphrase: &str, salt: &[u8])
--> ([u8; KEY_LEN], [u8; PASSPHRASE_HASH_LEN]) {
-    let mut hash = [0u8; KEY_LEN + PASSPHRASE_HASH_LEN];
+fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; KEY_LEN] {
+    let mut hash = [0u8; KEY_LEN];
     pbkdf2::<Hmac<Sha256>>(passphrase.as_bytes(), salt, KEY_ROUNDS, &mut hash);
-
     let mut key = [0u8; KEY_LEN];
-    let mut pass_hash = [0u8; PASSPHRASE_HASH_LEN];
-
     key.copy_from_slice(&hash[..KEY_LEN]);
-    pass_hash.copy_from_slice(&hash[KEY_LEN..]);
+    key
+}
 
-    (key, pass_hash)
+
+fn xor_stream<T: Read + Seek>(cursor: usize, base_counter: u128,
+                              key: &[u8], stream: &mut Buffer<T>,
+                              out: &mut [u8]) -> io::Result<usize> {
+    // align the position in the stream
+    let aligned_cursor = align_to_block(cursor);
+    let first_block_offset = cursor - aligned_cursor;
+
+    stream.seek_from_start(aligned_cursor)?;
+
+    // counter
+    let block_number = aligned_cursor / BLOCK_LEN;
+    let counter = base_counter.wrapping_add(block_number as u128);
+    let counter_bytes = counter.to_be_bytes();
+
+    // cipher
+    let key_ga = GenericArray::from_slice(key);
+    let counter_ga = GenericArray::from_slice(&counter_bytes);
+    let mut cipher = Aes128Ctr::new(key_ga, counter_ga);
+
+    // number of bytes remaining in the stream
+    let bytes_remaining = stream.len() - aligned_cursor;
+
+    // if the stream position is not block-aligned, encrypt just one block
+    if first_block_offset != 0 {
+        let mut block = [0u8; BLOCK_LEN];
+        let bytes_to_read = bytes_remaining.min(BLOCK_LEN)
+                                           .min(first_block_offset + out.len());
+
+        stream.read_exact(&mut block[..bytes_to_read])?;
+        cipher.apply_keystream(&mut block);
+
+        let bytes_to_copy = bytes_to_read - first_block_offset;
+        let block_slice_end = first_block_offset + bytes_to_copy;
+        let block_slice = &block[first_block_offset..block_slice_end];
+        out[..bytes_to_copy].copy_from_slice(block_slice);
+
+        return Ok(bytes_to_copy);
+    }
+
+    // We're block aligned and can use `out` directly to store the read
+    // data, and then encrypt it in place.
+
+    let bytes_to_copy = bytes_remaining.min(MAX_BYTES_PER_READ)
+                                       .min(out.len());
+
+    let out_slice = &mut out[..bytes_to_copy];
+    stream.read_exact(out_slice)?;
+    cipher.apply_keystream(out_slice);
+
+    Ok(bytes_to_copy)
 }
