@@ -14,21 +14,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
 //!
-//! Main crate module: It parses arguments, loads the passphrase,
+//! The entry module of the crate: Parses arguments, loads the configuration,
 //! and then hands over control to either [`single`] or [`filesystem`]
 //! modules to take care of the rest.
 //!
 
+
 mod buffer;
+mod config;
 mod crypto;
 
-use clap::{App, Arg, ArgGroup, ArgMatches };
+
+use std::env::{ self, Args };
+use std::process::exit;
+
+use clap::{ App, Arg, ArgGroup, ArgMatches };
+
+use crate::config::Config;
+
 
 ///
 /// Define and parse command line arguments.
 ///
-fn parse_arguments() -> ArgMatches {
+fn parse_arguments(args: Args) -> ArgMatches {
     App::new("tombdrive")
         .about("A simple cryptographic toolkit with a reverse-encryption filesystem")
         .version("0.0.2-alpha")
@@ -80,10 +90,24 @@ fn parse_arguments() -> ArgMatches {
             .required(true)
         )
         .term_width(79)
-        .get_matches()
+        .get_matches_from(args)
 }
 
 
+///
+/// This is where it all begins.
+///
 fn main() {
-    let args = parse_arguments();
+    let args = env::args();
+    let parsed_args = parse_arguments(args);
+    let configuration = Config::new(parsed_args);
+    match configuration {
+        Ok(config) => {
+
+        },
+        Err(message) => {
+            eprintln!("{}", message);
+            exit(1);
+        },
+    }
 }
