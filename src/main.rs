@@ -28,7 +28,7 @@ mod single;
 use std::env::{ self, Args };
 use std::process::exit;
 
-use clap::{ App, Arg, ArgGroup, ArgMatches };
+use clap::{ self, App, Arg, ArgGroup, ArgMatches };
 
 use crate::config::{ Config, Mode };
 use crate::single::process_file;
@@ -47,20 +47,22 @@ enum Exit {
 /// Define and parse command line arguments.
 ///
 fn parse_arguments(args: Args) -> ArgMatches {
-    App::new("tombdrive")
-        .about("A simple cryptographic toolkit with a reverse-encryption filesystem")
-        .version("0.0.2-alpha")
-        .after_help(concat!("If passfile is not provided, ",
+    App::new(clap::crate_name!())
+        .about(clap::crate_description!())
+        .version(clap::crate_version!())
+        .after_help(concat!("If <passfile> is not provided, ",
                             "the passphrase will be requested interactively"))
         .arg(Arg::new("encrypt")
             .short('e')
             .long("encrypt")
-            .help("Encrypt a single file / mount an encrypted folder")
+            .help("Encrypt a single file / mount an encrypted representation of a folder")
+            .display_order(0)
         )
         .arg(Arg::new("decrypt")
             .short('d')
             .long("decrypt")
-            .help("Decrypt a single file / mount a decrypted folder")
+            .help("Decrypt a single file / mount a decrypted representation of a folder")
+            .display_order(1)
         )
         .group(ArgGroup::new("mode")
             .arg("encrypt")
@@ -70,25 +72,27 @@ fn parse_arguments(args: Args) -> ArgMatches {
         .arg(Arg::new("mount")
             .short('m')
             .long("mount")
-            .help(concat!("Mount an encrypted / decrypted <source> folder onto ",
-                          "a <target> mountpoint (instead of encrypting / decrypting ",
-                          "a single file)"))
+            .help("Instead of the default single-file mode, operate in the filesystem mode")
+            .display_order(2)
         )
         .arg(Arg::new("passfile")
             .short('p')
             .long("passfile")
             .takes_value(true)
-            .help("Path to a file containing the passphrase")
+            .help("Path to a file whose contents will be read and used as a passphrase")
+            .display_order(3)
         )
         .arg(Arg::new("force")
             .short('f')
             .long("force")
-            .help("Overwrite the <target> if it already exists (single file mode only)")
+            .help("Overwrite the <target> if it already exists (single-file mode only)")
+            .display_order(4)
         )
         .arg(Arg::new("foreground")
             .short('F')
             .long("foreground")
-            .help("Run in foreground and do not daemonize (filesystem mode only)")
+            .help("Run in foreground, do not daemonize (filesystem mode only)")
+            .display_order(5)
         )
         .arg(Arg::new("source")
             .help("The file to be processed / the source folder for the filesystem")
@@ -98,7 +102,6 @@ fn parse_arguments(args: Args) -> ArgMatches {
             .help("The output file / the mountpoint for the filesystem")
             .required(true)
         )
-        .term_width(79)
         .get_matches_from(args)
 }
 

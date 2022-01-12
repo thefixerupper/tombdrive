@@ -17,11 +17,11 @@
 [package]
 name = "tombdrive"
 authors = ["Martin Furman"]
-description = "A simple cryptographic toolkit with a reverse-encryption filesystem"
+description = "A simple cryptographic toolkit with a virtual encryption filesystem"
 repository = "https://github.com/thefixerupper/tombdrive"
 keywords = ["cli", "encryption", "filesystem", "fs", "fuse"]
 categories = ["command-line-utilities", "cryptography", "filesystem"]
-version = "0.1.1"
+version = "0.1.2"
 license = "Apache-2.0"
 
 publish = false
@@ -30,7 +30,7 @@ edition = "2021"
 
 [dependencies]
 aes = { version = "0.7", features = ["ctr"] }
-clap = { version = "3.0", default_features = false, features = ["std"] }
+clap = { version = "3.0", default_features = false, features = ["std", "cargo", "wrap_help"] }
 hmac = { version = "0.12", default_features = false }
 pbkdf2 = { version = "0.10", default_features = false }
 sha2 = { version = "0.10", default_features = false }
