@@ -73,7 +73,7 @@ impl Config {
     /// if it was not provided via `passfile` (or reading passfile fails).
     ///
     pub fn new(parsed_args: ArgMatches) -> Result<Config, &'static str> {
-        let mode = if parsed_args.is_present("mode") {
+        let mode = if parsed_args.is_present("mount") {
             Mode::Filesystem
         } else {
             Mode::SingleFile
