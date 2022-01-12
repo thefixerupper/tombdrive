@@ -14,26 +14,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 //!
 //! The entry module of the crate: Parses arguments, loads the configuration,
 //! and then hands over control to either [`single`] or [`filesystem`]
 //! modules to take care of the rest.
 //!
 
-
 mod buffer;
 mod config;
 mod crypto;
-
+mod single;
 
 use std::env::{ self, Args };
 use std::process::exit;
 
 use clap::{ App, Arg, ArgGroup, ArgMatches };
 
-use crate::config::Config;
+use crate::config::{ Config, Mode };
+use crate::single::process_file;
 
+
+// Possible exit codes
+#[repr(u8)]
+enum Exit {
+    Success = 0,
+    ConfigurationFailure = 1,
+    FilesystemFailure = 2,
+    SingleFileFailure = 3,
+}
 
 ///
 /// Define and parse command line arguments.
@@ -103,11 +111,19 @@ fn main() {
     let configuration = Config::new(parsed_args);
     match configuration {
         Ok(config) => {
+            if config.mode == Mode::Mount {
 
+            } else {
+                if let Err(message) = process_file(config) {
+                    eprintln!("{}", message);
+                    exit(Exit::SingleFileFailure as i32);
+                }
+            }
         },
         Err(message) => {
             eprintln!("{}", message);
-            exit(1);
+            exit(Exit::ConfigurationFailure as i32);
         },
     }
+    exit(Exit::Success as i32);
 }

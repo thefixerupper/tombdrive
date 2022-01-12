@@ -20,6 +20,7 @@
         "mountpoint",
         "passfile",
         "pbkdf2",
+        "repr",
         "termion",
         "tombdrive",
     ]
