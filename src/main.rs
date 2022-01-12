@@ -55,23 +55,24 @@ fn parse_arguments(args: Args) -> ArgMatches {
         .arg(Arg::new("encrypt")
             .short('e')
             .long("encrypt")
-            .help("Encrypt a single file")
+            .help("Encrypt a single file / mount an encrypted folder")
         )
         .arg(Arg::new("decrypt")
             .short('d')
             .long("decrypt")
-            .help("Decrypt a single file")
-        )
-        .arg(Arg::new("mount")
-            .short('m')
-            .long("mount")
-            .help("Mount a reverse-encrypted <source> folder onto a <target> mountpoint")
+            .help("Decrypt a single file / mount a decrypted folder")
         )
         .group(ArgGroup::new("mode")
             .arg("encrypt")
             .arg("decrypt")
-            .arg("mount")
             .required(true)
+        )
+        .arg(Arg::new("mount")
+            .short('m')
+            .long("mount")
+            .help(concat!("Mount an encrypted / decrypted <source> folder onto ",
+                          "a <target> mountpoint (instead of encrypting / decrypting ",
+                          "a single file)"))
         )
         .arg(Arg::new("passfile")
             .short('p')
@@ -111,7 +112,7 @@ fn main() {
     let configuration = Config::new(parsed_args);
     match configuration {
         Ok(config) => {
-            if config.mode == Mode::Mount {
+            if config.mode == Mode::Filesystem {
 
             } else {
                 if let Err(message) = process_file(config) {

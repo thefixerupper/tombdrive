@@ -21,7 +21,7 @@ description = "A simple cryptographic toolkit with a reverse-encryption filesyst
 repository = "https://github.com/thefixerupper/tombdrive"
 keywords = ["cli", "encryption", "filesystem", "fs", "fuse"]
 categories = ["command-line-utilities", "cryptography", "filesystem"]
-version = "0.1.0"
+version = "0.1.1"
 license = "Apache-2.0"
 
 publish = false

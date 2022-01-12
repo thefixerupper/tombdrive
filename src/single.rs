@@ -22,7 +22,7 @@ use std::fs::{ self, File, Metadata, OpenOptions };
 use std::io::{ BufWriter, ErrorKind, Read, Write };
 
 use crate::buffer::Buffer;
-use crate::config::{ Config, Mode };
+use crate::config::{ Config, Operation };
 use crate::crypto::{ EncryptionReader, DecryptionReader };
 
 
@@ -68,11 +68,11 @@ pub fn process_file(config: Config) -> Result<(), String> {
         Err(err) => return Err(format!("Target error: {}", err)),
     };
 
-    match config.mode {
-        Mode::Encrypt => encrypt_file(source_file, metadata,
-                                      target_file, &config.passphrase),
-        Mode::Decrypt => decrypt_file(source_file, metadata,
-                                      target_file, &config.passphrase),
+    match config.operation {
+        Operation::Encrypt => encrypt_file(source_file, metadata,
+                                           target_file, &config.passphrase),
+        Operation::Decrypt => decrypt_file(source_file, metadata,
+                                           target_file, &config.passphrase),
         _ => Err(String::from("Unsupported mode"))
     }
 }

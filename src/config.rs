@@ -14,11 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 //!
 //! Provides the [`Config`] struct where the runtime configuration is stored.
 //!
-
 
 use std::fs::File;
 use std::io::{ self, Read, Write };
@@ -30,18 +28,27 @@ use termion::input::TermRead;
 ///
 /// Runtime mode covers two main modes of operation:
 ///
-///   - single file mode with [`Mode::Encrypt`] and [`Mode::Decrypt`],
-///     where a single file is encrypted or decrypted
+/// - single file mode encrypts / decrypts a single file in the source command
+///   line argument and saves it to the target command line argument
 ///
-///   - filesystem mode with [`Mode::Mount`], where an encrypted
-///     representation of the source folder is mounted onto a mountpoint
-///     encrypting files on demand as they are accessed
+/// - filesystem mode mounts an encrypted / decrypted representation
+///   of the source folder is mounted onto a mountpoint (target folder),
+///   encrypting files on demand as they are accessed
 ///
 #[derive(Debug, PartialEq)]
 pub enum Mode {
+    SingleFile,
+    Filesystem,
+}
+
+
+///
+/// Operation defines whether files should be encrypted or decrypted
+///
+#[derive(Debug, PartialEq)]
+pub enum Operation {
     Encrypt,
     Decrypt,
-    Mount,
 }
 
 
@@ -52,6 +59,7 @@ pub enum Mode {
 #[derive(Debug)]
 pub struct Config {
     pub mode: Mode,
+    pub operation: Operation,
     pub source: String,
     pub target: String,
     pub passphrase: Vec<u8>,
@@ -65,12 +73,16 @@ impl Config {
     /// if it was not provided via `passfile` (or reading passfile fails).
     ///
     pub fn new(parsed_args: ArgMatches) -> Result<Config, &'static str> {
-        let mode = if parsed_args.is_present("encrypt") {
-            Mode::Encrypt
-        } else if parsed_args.is_present("decrypt") {
-            Mode::Decrypt
+        let mode = if parsed_args.is_present("mode") {
+            Mode::Filesystem
         } else {
-            Mode::Mount
+            Mode::SingleFile
+        };
+
+        let operation = if parsed_args.is_present("encrypt") {
+            Operation::Encrypt
+        } else {
+            Operation::Decrypt
         };
 
         // These two should never panic as the argument parser should not
@@ -92,7 +104,7 @@ impl Config {
                 },
             }
         } else {
-            match Self::passphrase_from_input(&mode) {
+            match Self::passphrase_from_input(&operation) {
                 Ok(pass) => {
                     pass
                 },
@@ -105,7 +117,7 @@ impl Config {
         let force = parsed_args.is_present("force");
         let foreground = parsed_args.is_present("foreground");
 
-        Ok(Config { mode, source, target, passphrase, force, foreground })
+        Ok(Config { mode, operation, source, target, passphrase, force, foreground })
     }
 
     ///
@@ -122,7 +134,7 @@ impl Config {
     ///
     /// Loads the passphrase from the standard input.
     ///
-    fn passphrase_from_input(mode: &Mode) -> Result<Vec<u8>, &'static str> {
+    fn passphrase_from_input(operation: &Operation) -> Result<Vec<u8>, &'static str> {
         let passphrase = Self::read_passphrase("Passphrase: ");
         match passphrase {
             Some(pass) => {
@@ -130,7 +142,7 @@ impl Config {
                     return Err("Passphrase must not be empty");
                 }
 
-                if *mode == Mode::Encrypt {
+                if *operation == Operation::Encrypt {
                     let repeat = Self::read_passphrase("Repeat passphrase: ");
                     if repeat.is_none() {
                         return Err("No repeated passphrase provided");
