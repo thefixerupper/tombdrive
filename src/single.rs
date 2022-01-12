@@ -68,12 +68,17 @@ pub fn process_file(config: Config) -> Result<(), String> {
         Err(err) => return Err(format!("Target error: {}", err)),
     };
 
+    // special case: empty files are encrypted/decrypted into empty files
+    // and that's what we already have
+    if metadata.len() == 0 {
+        return Ok(());
+    }
+
     match config.operation {
         Operation::Encrypt => encrypt_file(source_file, metadata,
                                            target_file, &config.passphrase),
         Operation::Decrypt => decrypt_file(source_file, metadata,
                                            target_file, &config.passphrase),
-        _ => Err(String::from("Unsupported mode"))
     }
 }
 
@@ -138,6 +143,9 @@ fn copy_file(mut source: impl Read, mut target: impl Write) -> Result<(), String
         if let Err(err) = target.write_all(&buffer[..copied]) {
             return Err(format!("Writing error: {}", err));
         }
+    }
+    if let Err(err) = target.flush() {
+        return Err(format!("Failed to flush written data: {}", err));
     }
     Ok(())
 }
