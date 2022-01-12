@@ -129,7 +129,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
     ///
     /// The encrypted data is then readable by [`DecryptionReader`].
     ///
-    pub fn new(mut stream: Buffer<T>, passphrase: &str)
+    pub fn new(mut stream: Buffer<T>, passphrase: &[u8])
                -> io::Result<EncryptionReader<T>> {
         let total_len = stream.len();
         if total_len == 0 {
@@ -219,7 +219,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
     /// if the `stream` does not look like it was encrypted using
     /// [`EncryptionReader<T>`].
     ///
-    pub fn new(mut stream: Buffer<T>, passphrase: &str)
+    pub fn new(mut stream: Buffer<T>, passphrase: &[u8])
                -> io::Result<DecryptionReader<T>> {
         let total_len = stream.len();
         if total_len == 0 {
@@ -294,9 +294,9 @@ fn align_to_block(cursor: usize) -> usize {
 /// of an encrypted file used to quickly, and not perfectly, check if the
 /// provided passphrase is wrong).
 ///
-fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; KEY_LEN] {
+fn derive_key(passphrase: &[u8], salt: &[u8]) -> [u8; KEY_LEN] {
     let mut hash = [0u8; KEY_LEN];
-    pbkdf2::<Hmac<Sha256>>(passphrase.as_bytes(), salt, KEY_ROUNDS, &mut hash);
+    pbkdf2::<Hmac<Sha256>>(passphrase, salt, KEY_ROUNDS, &mut hash);
     let mut key = [0u8; KEY_LEN];
     key.copy_from_slice(&hash[..KEY_LEN]);
     key
@@ -371,9 +371,9 @@ pub mod tests {
         "swirl of gritty dust from entering along with him."
     ).as_bytes();
 
-    const PASSPHRASE: &str = "1984";
+    const PASSPHRASE: &[u8] = b"1984";
 
-    fn encrypt(plaintext: &[u8], passphrase: &str) -> Vec<u8> {
+    fn encrypt(plaintext: &[u8], passphrase: &[u8]) -> Vec<u8> {
         let plain_file = Cursor::new(plaintext);
         let plain_stream = Buffer::with_capacity(plaintext.len() + HEADER_LEN,
                                                  plain_file).unwrap();
@@ -384,7 +384,7 @@ pub mod tests {
         ciphertext
     }
 
-    fn decrypt(ciphertext: &[u8], passphrase: &str) -> Vec<u8> {
+    fn decrypt(ciphertext: &[u8], passphrase: &[u8]) -> Vec<u8> {
         let cipher_file = Cursor::new(&ciphertext);
         let cipher_stream = Buffer::with_capacity(ciphertext.len() - HEADER_LEN,
                                                   cipher_file).unwrap();
