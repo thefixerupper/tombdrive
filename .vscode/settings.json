@@ -16,8 +16,12 @@
 
 {
     "cSpell.words": [
+        "fuser",
         "hmac",
+        "inodes",
+        "libc",
         "mountpoint",
+        "opendir",
         "passfile",
         "pbkdf2",
         "repr",

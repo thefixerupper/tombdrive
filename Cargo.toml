@@ -21,7 +21,7 @@ description = "A simple cryptographic toolkit with a virtual encryption filesyst
 repository = "https://github.com/thefixerupper/tombdrive"
 keywords = ["cli", "encryption", "filesystem", "fs", "fuse"]
 categories = ["command-line-utilities", "cryptography", "filesystem"]
-version = "0.1.4"
+version = "0.1.5"
 license = "Apache-2.0"
 
 publish = false
@@ -31,7 +31,9 @@ edition = "2021"
 [dependencies]
 aes = { version = "0.7", features = ["ctr"] }
 clap = { version = "3.0", default_features = false, features = ["std", "cargo", "wrap_help"] }
+fuser = { version = "0.10", features = ["abi-7-31"] }
 hmac = { version = "0.12", default_features = false }
+libc = { version = "0.2" }
 pbkdf2 = { version = "0.10", default_features = false }
 sha2 = { version = "0.10", default_features = false }
 termion = { version = "1.5" }

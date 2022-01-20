@@ -23,6 +23,8 @@
 mod buffer;
 mod config;
 mod crypto;
+mod filesystem;
+mod fuse;
 mod single;
 
 use std::env::{ self, Args };
@@ -31,6 +33,7 @@ use std::process::exit;
 use clap::{ self, App, Arg, ArgGroup, ArgMatches };
 
 use crate::config::{ Config, Mode };
+use crate::filesystem::Filesystem;
 use crate::single::process_file;
 
 
@@ -116,7 +119,16 @@ fn main() {
     match configuration {
         Ok(config) => {
             if config.mode == Mode::Filesystem {
-
+                let filesystem = Filesystem::new(config);
+                if let Err(err) = filesystem {
+                    eprintln!("{}", err);
+                    exit(Exit::FilesystemFailure as i32);
+                }
+                let mut filesystem = filesystem.unwrap();
+                if let Err(err) = filesystem.mount() {
+                    eprintln!("{}", err);
+                    exit(Exit::FilesystemFailure as i32);
+                }
             } else {
                 if let Err(message) = process_file(config) {
                     eprintln!("{}", message);
