@@ -1,4 +1,4 @@
-// This file is part of Tombdrive
+// This file is part of Tomb Drive
 //
 // Copyright 2022 Martin Furman
 //
@@ -32,7 +32,7 @@ use pbkdf2::pbkdf2;
 use sha2::{Digest, Sha256};
 
 use crate::buffer::Buffer;
-
+use crate::config::Passphrase;
 
 /// The number of bytes in the counter attribute
 const COUNTER_LEN: usize = BLOCK_LEN;
@@ -41,7 +41,7 @@ const COUNTER_LEN: usize = BLOCK_LEN;
 const SALT_LEN: usize = 16;
 
 /// The number of bytes in the entire header
-const HEADER_LEN: usize = COUNTER_LEN + SALT_LEN;
+pub const HEADER_LEN: usize = COUNTER_LEN + SALT_LEN;
 
 /// The number of bytes in a key
 const KEY_LEN: usize = 16;
@@ -129,7 +129,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
     ///
     /// The encrypted data is then readable by [`DecryptionReader`].
     ///
-    pub fn new(mut stream: Buffer<T>, passphrase: &[u8])
+    pub fn new(mut stream: Buffer<T>, passphrase: &Passphrase)
                -> io::Result<EncryptionReader<T>> {
         let total_len = stream.len();
         if total_len == 0 {
@@ -139,7 +139,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
         let attributes = Attributes::from(&mut stream)?;
         stream.seek_from_start(0)?;
 
-        let key = derive_key(passphrase, &attributes.salt);
+        let key = derive_key(&passphrase.raw, &attributes.salt);
 
         let mut header = [0u8; HEADER_LEN];
 
@@ -219,7 +219,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
     /// if the `stream` does not look like it was encrypted using
     /// [`EncryptionReader<T>`].
     ///
-    pub fn new(mut stream: Buffer<T>, passphrase: &[u8])
+    pub fn new(mut stream: Buffer<T>, passphrase: &Passphrase)
                -> io::Result<DecryptionReader<T>> {
         let total_len = stream.len();
         if total_len == 0 {
@@ -238,7 +238,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
 
         let counter = u128::from_be_bytes(counter_bytes);
         let attributes = Attributes { counter, salt };
-        let key = derive_key(passphrase, &salt);
+        let key = derive_key(&passphrase.raw, &salt);
 
         Ok(DecryptionReader { attributes, cursor: 0, key, stream })
     }
@@ -371,9 +371,9 @@ pub mod tests {
         "swirl of gritty dust from entering along with him."
     ).as_bytes();
 
-    const PASSPHRASE: &[u8] = b"1984";
+    const PASSPHRASE_BYTES: &[u8] = b"1984";
 
-    fn encrypt(plaintext: &[u8], passphrase: &[u8]) -> Vec<u8> {
+    fn encrypt(plaintext: &[u8], passphrase: &Passphrase) -> Vec<u8> {
         let plain_file = Cursor::new(plaintext);
         let plain_stream = Buffer::with_capacity(plaintext.len() + HEADER_LEN,
                                                  plain_file).unwrap();
@@ -384,7 +384,7 @@ pub mod tests {
         ciphertext
     }
 
-    fn decrypt(ciphertext: &[u8], passphrase: &[u8]) -> Vec<u8> {
+    fn decrypt(ciphertext: &[u8], passphrase: &Passphrase) -> Vec<u8> {
         let cipher_file = Cursor::new(&ciphertext);
         let cipher_stream = Buffer::with_capacity(ciphertext.len() - HEADER_LEN,
                                                   cipher_file).unwrap();
@@ -401,8 +401,9 @@ pub mod tests {
     ///
     #[test]
     fn encryption_round_trip() {
-        let ciphertext = encrypt(PLAINTEXT, PASSPHRASE);
-        let plaintext = decrypt(&ciphertext, PASSPHRASE);
+        let passphrase = Passphrase { raw: PASSPHRASE_BYTES.to_vec() };
+        let ciphertext = encrypt(PLAINTEXT, &passphrase);
+        let plaintext = decrypt(&ciphertext, &passphrase);
         assert_eq!(&plaintext[..], PLAINTEXT);
     }
 
@@ -412,12 +413,13 @@ pub mod tests {
     ///
     #[test]
     fn partial_encryption() {
-        let ciphertext = encrypt(PLAINTEXT, PASSPHRASE);
+        let passphrase = Passphrase { raw: PASSPHRASE_BYTES.to_vec() };
+        let ciphertext = encrypt(PLAINTEXT, &passphrase);
 
         let plain_file = Cursor::new(PLAINTEXT);
         let plain_stream = Buffer::with_capacity(PLAINTEXT.len() + HEADER_LEN,
                                                  plain_file).unwrap();
-        let mut enc_reader = EncryptionReader::new(plain_stream, PASSPHRASE)
+        let mut enc_reader = EncryptionReader::new(plain_stream, &passphrase)
                              .unwrap();
 
         // test equality when looking at corresponding sections

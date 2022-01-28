@@ -1,4 +1,4 @@
-// This file is part of Tombdrive
+// This file is part of Tomb Drive
 //
 // Copyright 2022 Martin Furman
 //
@@ -14,156 +14,261 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//!
-//! Provides the [`Config`] struct where the runtime configuration is stored.
-//!
-
-use std::fs::File;
+use std::fs::{ self, File };
 use std::io::{ self, Read, Write };
+use std::path::PathBuf;
+use std::process;
 
-use clap::ArgMatches;
+use clap::{ self, App, Arg, ArgGroup, ArgMatches };
 use termion::input::TermRead;
 
+use crate::ExitStatus;
 
-///
-/// Runtime mode covers two main modes of operation:
-///
-/// - single file mode encrypts / decrypts a single file in the source command
-///   line argument and saves it to the target command line argument
-///
-/// - filesystem mode mounts an encrypted / decrypted representation
-///   of the source folder is mounted onto a mountpoint (target folder),
-///   encrypting files on demand as they are accessed
-///
-#[derive(Debug, PartialEq)]
-pub enum Mode {
-    SingleFile,
-    Filesystem,
-}
+// ================= //
+//     OPERATION     //
+// ================= //
 
-
-///
-/// Operation defines whether files should be encrypted or decrypted
-///
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Operation {
-    Encrypt,
     Decrypt,
+    Encrypt,
 }
 
+// ================== //
+//     PASSPHRASE     //
+// ================== //
 
-///
-/// Runtime configuration, mostly parsed from the command line arguments,
-/// and/or interaction with the user before any proper execution starts.
-///
+#[derive(Debug)]
+pub struct Passphrase {
+    pub(crate) raw: Vec<u8>,
+}
+
+impl AsRef<[u8]> for Passphrase {
+    fn as_ref(&self) -> &[u8] {
+        self.raw.as_ref()
+    }
+}
+
+impl Drop for Passphrase {
+    fn drop(&mut self) {
+        for b in self.raw.iter_mut() {
+            *b = 0;
+        }
+    }
+}
+
+// ============== //
+//     CONFIG     //
+// ============== //
+
 #[derive(Debug)]
 pub struct Config {
-    pub mode: Mode,
-    pub operation: Operation,
-    pub source: String,
-    pub target: String,
-    pub passphrase: Vec<u8>,
     pub force: bool,
     pub foreground: bool,
+    pub mount: bool,
+    pub operation: Operation,
+    pub passphrase: Passphrase,
+    pub single_threaded: bool,
+    pub source: PathBuf,
+    pub target: PathBuf,
+    pub verbose: bool,
 }
 
 impl Config {
-    ///
-    /// Creates a new instance of [`Config`], asking for passphrase
-    /// if it was not provided via `passfile` (or reading passfile fails).
-    ///
-    pub fn new(parsed_args: ArgMatches) -> Result<Config, &'static str> {
-        let mode = if parsed_args.is_present("mount") {
-            Mode::Filesystem
-        } else {
-            Mode::SingleFile
-        };
+    const DECRYPT: &'static str = "decrypt";
+    const ENCRYPT: &'static str = "encrypt";
+    const FORCE: &'static str = "force";
+    const FOREGROUND: &'static str = "foreground";
+    const MOUNT: &'static str = "mount";
+    const OPERATION: &'static str = "operation";
+    const PASSFILE: &'static str = "passfile";
+    const SINGLE_THREADED: &'static str = "single-threaded";
+    const SOURCE: &'static str = "source";
+    const TARGET: &'static str = "target";
+    const VERBOSE: &'static str = "verbose";
 
-        let operation = if parsed_args.is_present("encrypt") {
+    pub fn new() -> Self {
+        let args = Self::parse_arguments();
+
+        let force = args.is_present(Self::FORCE);
+        let foreground = args.is_present(Self::FOREGROUND);
+        let mount = args.is_present(Self::MOUNT);
+        let single_threaded = args.is_present(Self::SINGLE_THREADED);
+        let verbose = args.is_present(Self::VERBOSE);
+
+        // operation
+
+        let operation = if args.is_present(Self::DECRYPT) {
+            Operation::Decrypt
+        } else if args.is_present(Self::ENCRYPT) {
             Operation::Encrypt
         } else {
-            Operation::Decrypt
+            unreachable!()
         };
 
-        // These two should never panic as the argument parser should not
-        // let us get this far with them missing.
-        let source = String::from(parsed_args.value_of("source")
-                                             .expect("Missing source argument"));
-        let target = String::from(parsed_args.value_of("target")
-                                             .expect("Missing target argument"));
+        // source
 
-        let passphrase = if parsed_args.is_present("passfile") {
-            let passfile = parsed_args.value_of("passfile").unwrap();
-            match Self::passphrase_from_passfile(passfile) {
-                Ok(pass) => {
-                    pass
-                },
-                Err(_) => {
-                    // Any more specific error could reveal secrets in logs
-                    return Err("Failed to load the passfile");
-                },
-            }
+        let source_arg = args.value_of(Self::SOURCE)
+                             .expect("Missing <source> argument");
+        let source = match fs::canonicalize(source_arg) {
+            Ok(source_path) if mount => Self::source_directory(source_path),
+            Ok(source_path) /* !mount */ => Self::source_file(source_path),
+            Err(_) => {
+                eprintln!("Source path error");
+                process::exit(ExitStatus::INVALID_ARGUMENT);
+            },
+        };
+
+        // target
+
+        let target_arg = args.value_of(Self::TARGET)
+                             .expect("Missing <target> argument");
+        let target_path = PathBuf::from(target_arg);
+        let target = if mount {
+            Self::target_directory(&source, target_path)
         } else {
-            match Self::passphrase_from_input(&operation) {
-                Ok(pass) => {
-                    pass
-                },
-                Err(err) => {
-                    return Err(err);
-                }
-            }
+            Self::target_file(&source, target_path, force)
         };
 
-        let force = parsed_args.is_present("force");
-        let foreground = parsed_args.is_present("foreground");
+        // passphrase
 
-        Ok(Config { mode, operation, source, target, passphrase, force, foreground })
+        let passphrase_raw = match args.value_of(Self::PASSFILE) {
+            Some(path) => Self::passphrase_from_file(path),
+            None =>  Self::passphrase_from_input(&operation),
+        };
+        let passphrase = Passphrase { raw: passphrase_raw };
+
+        // return
+
+        Self {
+            force,
+            foreground,
+            mount,
+            operation,
+            passphrase,
+            single_threaded,
+            source,
+            target,
+            verbose,
+        }
     }
 
-    ///
-    /// Loads the passphrase from a file.
-    ///
-    fn passphrase_from_passfile(path: &str) -> io::Result<Vec<u8>> {
-        let mut file = File::open(path)?;
-        let info = file.metadata()?;
-        let mut passphrase: Vec<u8> = Vec::with_capacity(info.len() as usize);
-        file.read_to_end(&mut passphrase)?;
-        Ok(passphrase)
+    fn parse_arguments() -> ArgMatches {
+        App::new(clap::crate_name!())
+            .about(clap::crate_description!())
+            .version(clap::crate_version!())
+            .after_help(concat!("If <passfile> is not provided, ",
+                                "the passphrase will be requested interactively"))
+            .arg(Arg::new(Self::ENCRYPT)
+                .short('e')
+                .long("encrypt")
+                .help("Encrypt a single file / mount an encrypted representation of a folder")
+                .display_order(0)
+            )
+            .arg(Arg::new(Self::DECRYPT)
+                .short('d')
+                .long("decrypt")
+                .help("Decrypt a single file / mount a decrypted representation of a folder")
+                .display_order(1)
+            )
+            .group(ArgGroup::new(Self::OPERATION)
+                .arg(Self::ENCRYPT)
+                .arg(Self::DECRYPT)
+                .required(true)
+            )
+            .arg(Arg::new(Self::MOUNT)
+                .short('m')
+                .long("mount")
+                .help("Instead of the default single-file mode, operate in the filesystem mode")
+                .display_order(2)
+            )
+            .arg(Arg::new(Self::PASSFILE)
+                .short('p')
+                .long("passfile")
+                .takes_value(true)
+                .help("Path to a file whose contents will be read and used as a passphrase")
+                .display_order(3)
+            )
+            .arg(Arg::new(Self::FORCE)
+                .short('f')
+                .long("force")
+                .help("Overwrite the <target> if it already exists (single-file mode only)")
+                .display_order(4)
+            )
+            .arg(Arg::new(Self::FOREGROUND)
+                .short('F')
+                .long("foreground")
+                .help("Run in foreground, do not daemonize (filesystem mode only)")
+                .display_order(5)
+            )
+            .arg(Arg::new(Self::SINGLE_THREADED)
+                .short('s')
+                .long("single-threaded")
+                .help("Run single-threaded")
+                .display_order(6)
+            )
+            .arg(Arg::new(Self::VERBOSE)
+                .short('v')
+                .long("verbose")
+                .help("Show debugging print information")
+                .display_order(7)
+            )
+            .arg(Arg::new(Self::SOURCE)
+                .help("The file to be processed / the source folder for the filesystem")
+                .required(true)
+            )
+            .arg(Arg::new(Self::TARGET)
+                .help("The output file / the mountpoint for the filesystem")
+                .required(true)
+            )
+            .get_matches()
     }
 
-    ///
-    /// Loads the passphrase from the standard input.
-    ///
-    fn passphrase_from_input(operation: &Operation) -> Result<Vec<u8>, &'static str> {
+    fn passphrase_from_file(path: &str) -> Vec<u8> {
+        if let Ok(mut file) = File::open(path) {
+            let mut raw = Vec::new();
+            if let Err(_) = file.read_to_end(&mut raw) {
+                eprintln!("Could not read passfile");
+                process::exit(ExitStatus::IO_ERROR);
+            }
+            return raw;
+        } else {
+            eprintln!("Could not open passfile");
+            process::exit(ExitStatus::INVALID_ARGUMENT);
+        }
+    }
+
+    fn passphrase_from_input(operation: &Operation) -> Vec<u8> {
         let passphrase = Self::read_passphrase("Passphrase: ");
         match passphrase {
             Some(pass) => {
                 if pass.is_empty() {
-                    return Err("Passphrase must not be empty");
+                    eprintln!("Passphrase must not be empty");
+                    process::exit(ExitStatus::INVALID_INPUT);
                 }
 
                 if *operation == Operation::Encrypt {
                     let repeat = Self::read_passphrase("Repeat passphrase: ");
                     if repeat.is_none() {
-                        return Err("No repeated passphrase provided");
+                        eprintln!("No repeated passphrase provided");
+                        process::exit(ExitStatus::INVALID_INPUT);
                     }
                     if pass != repeat.unwrap() {
-                        return Err("Repeated passphrase does not match");
+                        eprintln!("Repeated passphrase does not match");
+                        process::exit(ExitStatus::INVALID_INPUT);
                     }
                 }
                 let mut pass_vec = vec![0u8; pass.len()];
                 pass_vec.copy_from_slice(pass.as_bytes());
-                return Ok(pass_vec)
+                return pass_vec;
             },
             None => {
-                return Err("No passphrase provided")
+                eprintln!("No passphrase provided");
+                process::exit(ExitStatus::INVALID_INPUT);
             },
         }
     }
 
-    ///
-    /// Prompts user for a passphrase.
-    ///
     fn read_passphrase(prompt: &str) -> Option<String> {
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -178,5 +283,71 @@ impl Config {
         stdout.write_all(b"\n").unwrap();
 
         passphrase
+    }
+
+    fn source_directory(source_path: PathBuf) -> PathBuf {
+        if source_path.is_dir() {
+            source_path
+        } else {
+            eprintln!("Source directory does not exist");
+            process::exit(ExitStatus::INVALID_ARGUMENT);
+        }
+    }
+
+    fn source_file(source_path: PathBuf) -> PathBuf {
+        if source_path.is_file() {
+            source_path
+        } else {
+            eprintln!("Source file does not exist");
+            process::exit(ExitStatus::INVALID_ARGUMENT);
+        }
+    }
+
+    fn target_directory(source: &PathBuf, target_path: PathBuf) -> PathBuf {
+        if target_path.is_dir() {
+            let canonical_target_path = target_path.canonicalize()
+                                                   .expect("Target path error");
+            if canonical_target_path == *source {
+                eprintln!("Source and target cannot be the same directory");
+                process::exit(ExitStatus::INVALID_ARGUMENT);
+            }
+            if canonical_target_path.starts_with(&source) {
+                eprintln!("Target cannot be under the source directory");
+                process::exit(ExitStatus::INVALID_ARGUMENT);
+            }
+            if source.starts_with(&canonical_target_path) {
+                eprintln!("Source cannot be under the target directory");
+                process::exit(ExitStatus::INVALID_ARGUMENT);
+            }
+            canonical_target_path
+        } else {
+            eprintln!("Target directory does not exist");
+            process::exit(ExitStatus::INVALID_ARGUMENT);
+        }
+    }
+
+    fn target_file(source: &PathBuf, mut target_path: PathBuf, force: bool) -> PathBuf {
+        if target_path.is_dir() {
+            target_path.push(source.file_name().unwrap());
+        }
+        if target_path.is_file() {
+            let canonical_target_path = target_path.canonicalize().unwrap();
+            if canonical_target_path == *source {
+                eprintln!("Source and target cannot be the same file");
+                process::exit(ExitStatus::INVALID_ARGUMENT);
+            }
+            if !force {
+                eprintln!("Target file exists (use '-f' to overwrite')");
+                process::exit(ExitStatus::INVALID_ARGUMENT);
+            }
+            target_path
+        } else if target_path.is_dir() {
+            // if target_path + source.file_name() are still a directory
+            eprintln!("Target file points to a directory: {}",
+                      target_path.to_string_lossy());
+            process::exit(ExitStatus::INVALID_ARGUMENT);
+        } else {
+            target_path
+        }
     }
 }

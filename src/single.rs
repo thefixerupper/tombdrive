@@ -1,4 +1,4 @@
-// This file is part of Tombdrive
+// This file is part of Tomb Drive
 //
 // Copyright 2022 Martin Furman
 //
@@ -22,7 +22,7 @@ use std::fs::{ self, File, Metadata, OpenOptions };
 use std::io::{ BufWriter, ErrorKind, Read, Write };
 
 use crate::buffer::Buffer;
-use crate::config::{ Config, Operation };
+use crate::config::{ Config, Operation, Passphrase };
 use crate::crypto::{ EncryptionReader, DecryptionReader };
 
 
@@ -87,7 +87,7 @@ pub fn process_file(config: Config) -> Result<(), String> {
 /// Set up buffers and cryptographic reader for encryption and then
 /// copy the data over into the target file.
 ///
-fn encrypt_file(source: File, meta: Metadata, target: File, passphrase: &[u8])
+fn encrypt_file(source: File, meta: Metadata, target: File, passphrase: &Passphrase)
                 -> Result<(), String> {
     let capacity = (meta.len() as usize).min(ENC_BUFFER_LEN);
     let source_buffer = match Buffer::with_capacity(capacity, source) {
@@ -108,7 +108,7 @@ fn encrypt_file(source: File, meta: Metadata, target: File, passphrase: &[u8])
 /// Set up buffers and cryptographic reader for decryption and then
 /// copy the data over into the target file.
 ///
-fn decrypt_file(source: File, meta: Metadata, target: File, passphrase: &[u8])
+fn decrypt_file(source: File, meta: Metadata, target: File, passphrase: &Passphrase)
                 -> Result<(), String> {
     let capacity = (meta.len() as usize).min(DEC_BUFFER_LEN);
     let source_buffer = match Buffer::with_capacity(capacity, source) {
