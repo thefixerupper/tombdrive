@@ -16,13 +16,12 @@
 
 use std::fs::{ self, File };
 use std::io::{ self, Read, Write };
-use std::path::PathBuf;
+use std::path::{ Path, PathBuf };
 use std::process;
 
-use clap::{ self, App, Arg, ArgGroup, ArgMatches };
+use clap::{ App, Arg, ArgGroup, ArgMatches };
+use log::error;
 use termion::input::TermRead;
-
-use crate::ExitStatus;
 
 // ================= //
 //     OPERATION     //
@@ -40,7 +39,13 @@ pub enum Operation {
 
 #[derive(Debug)]
 pub struct Passphrase {
-    pub(crate) raw: Vec<u8>,
+    raw: Vec<u8>,
+}
+
+impl From<Vec<u8>> for Passphrase {
+    fn from(raw: Vec<u8>) -> Self {
+        Self { raw }
+    }
 }
 
 impl AsRef<[u8]> for Passphrase {
@@ -63,15 +68,14 @@ impl Drop for Passphrase {
 
 #[derive(Debug)]
 pub struct Config {
-    pub force: bool,
-    pub foreground: bool,
-    pub mount: bool,
-    pub operation: Operation,
-    pub passphrase: Passphrase,
-    pub single_threaded: bool,
-    pub source: PathBuf,
-    pub target: PathBuf,
-    pub verbose: bool,
+    force: bool,
+    foreground: bool,
+    mount: bool,
+    operation: Operation,
+    passphrase: Passphrase,
+    single_threaded: bool,
+    source: PathBuf,
+    target: PathBuf,
 }
 
 impl Config {
@@ -90,11 +94,17 @@ impl Config {
     pub fn new() -> Self {
         let args = Self::parse_arguments();
 
+        let logger_env = match args.occurrences_of(Self::VERBOSE) {
+            1 => env_logger::Env::default().filter("debug"),
+            2 => env_logger::Env::default().filter("trace"),
+            _ => env_logger::Env::default().default_filter_or("info"),
+        };
+        env_logger::Builder::from_env(logger_env).init();
+
         let force = args.is_present(Self::FORCE);
         let foreground = args.is_present(Self::FOREGROUND);
         let mount = args.is_present(Self::MOUNT);
         let single_threaded = args.is_present(Self::SINGLE_THREADED);
-        let verbose = args.is_present(Self::VERBOSE);
 
         // operation
 
@@ -111,11 +121,11 @@ impl Config {
         let source_arg = args.value_of(Self::SOURCE)
                              .expect("Missing <source> argument");
         let source = match fs::canonicalize(source_arg) {
-            Ok(source_path) if mount => Self::source_directory(source_path),
-            Ok(source_path) /* !mount */ => Self::source_file(source_path),
-            Err(_) => {
-                eprintln!("Source path error");
-                process::exit(ExitStatus::INVALID_ARGUMENT);
+            Ok(source_path) if mount => source_directory(source_path),
+            Ok(source_path) /* !mount */ => source_file(source_path),
+            Err(err) => {
+                error!("Source: {}", err);
+                process::exit(libc::EINVAL);
             },
         };
 
@@ -125,16 +135,16 @@ impl Config {
                              .expect("Missing <target> argument");
         let target_path = PathBuf::from(target_arg);
         let target = if mount {
-            Self::target_directory(&source, target_path)
+            target_directory(&source, target_path)
         } else {
-            Self::target_file(&source, target_path, force)
+            target_file(&source, target_path, force)
         };
 
         // passphrase
 
         let passphrase_raw = match args.value_of(Self::PASSFILE) {
-            Some(path) => Self::passphrase_from_file(path),
-            None =>  Self::passphrase_from_input(&operation),
+            Some(path) => passphrase_from_file(path),
+            None => passphrase_from_input(operation),
         };
         let passphrase = Passphrase { raw: passphrase_raw };
 
@@ -149,8 +159,39 @@ impl Config {
             single_threaded,
             source,
             target,
-            verbose,
         }
+    }
+
+    pub fn force(&self) -> bool {
+        self.force
+    }
+
+    pub fn foreground(&self) -> bool {
+        self.foreground
+    }
+
+    pub fn mount(&self) -> bool {
+        self.mount
+    }
+
+    pub fn operation(&self) -> Operation {
+        self.operation
+    }
+
+    pub fn passphrase(&self) -> &Passphrase {
+        &self.passphrase
+    }
+
+    pub fn single_threaded(&self) -> bool {
+        self.single_threaded
+    }
+
+    pub fn source(&self) -> &Path {
+        self.source.as_path()
+    }
+
+    pub fn target(&self) -> &Path {
+        self.target.as_path()
     }
 
     fn parse_arguments() -> ArgMatches {
@@ -210,7 +251,8 @@ impl Config {
             .arg(Arg::new(Self::VERBOSE)
                 .short('v')
                 .long("verbose")
-                .help("Show debugging print information")
+                .multiple_occurrences(true)
+                .help("Show debugging information (use twice for more detail)")
                 .display_order(7)
             )
             .arg(Arg::new(Self::SOURCE)
@@ -223,131 +265,149 @@ impl Config {
             )
             .get_matches()
     }
+}
 
-    fn passphrase_from_file(path: &str) -> Vec<u8> {
-        if let Ok(mut file) = File::open(path) {
+// ======================== //
+//     helper functions     //
+// ======================== //
+
+fn passphrase_from_file(path: &str) -> Vec<u8> {
+    match File::open(path) {
+        Ok(mut file) => {
             let mut raw = Vec::new();
-            if let Err(_) = file.read_to_end(&mut raw) {
-                eprintln!("Could not read passfile");
-                process::exit(ExitStatus::IO_ERROR);
+            if let Err(err) = file.read_to_end(&mut raw) {
+                error!("Could not read passfile: {}", err);
+                process::exit(libc::EIO);
             }
-            return raw;
-        } else {
-            eprintln!("Could not open passfile");
-            process::exit(ExitStatus::INVALID_ARGUMENT);
-        }
+            raw
+        },
+        Err(err) => {
+            error!("Could not open passfile: {}", err);
+            process::exit(libc::EIO);
+        },
     }
+}
 
-    fn passphrase_from_input(operation: &Operation) -> Vec<u8> {
-        let passphrase = Self::read_passphrase("Passphrase: ");
-        match passphrase {
-            Some(pass) => {
-                if pass.is_empty() {
-                    eprintln!("Passphrase must not be empty");
-                    process::exit(ExitStatus::INVALID_INPUT);
+fn passphrase_from_input(operation: Operation) -> Vec<u8> {
+    let passphrase = read_passphrase("Passphrase: ");
+    match passphrase {
+        Some(pass) => {
+            if pass.is_empty() {
+                error!("Passphrase must not be empty");
+                process::exit(libc::EINVAL);
+            }
+
+            if operation == Operation::Encrypt {
+                let repeat = read_passphrase("Repeat passphrase: ");
+                if repeat.is_none() {
+                    error!("No repeated passphrase provided");
+                    process::exit(libc::EINVAL);
                 }
-
-                if *operation == Operation::Encrypt {
-                    let repeat = Self::read_passphrase("Repeat passphrase: ");
-                    if repeat.is_none() {
-                        eprintln!("No repeated passphrase provided");
-                        process::exit(ExitStatus::INVALID_INPUT);
-                    }
-                    if pass != repeat.unwrap() {
-                        eprintln!("Repeated passphrase does not match");
-                        process::exit(ExitStatus::INVALID_INPUT);
-                    }
+                if pass != repeat.unwrap() {
+                    error!("Repeated passphrase does not match");
+                    process::exit(libc::EINVAL);
                 }
-                let mut pass_vec = vec![0u8; pass.len()];
-                pass_vec.copy_from_slice(pass.as_bytes());
-                return pass_vec;
+            }
+            let mut pass_vec = vec![0u8; pass.len()];
+            pass_vec.copy_from_slice(pass.as_bytes());
+            pass_vec
+        },
+        None => {
+            error!("No passphrase provided");
+            process::exit(libc::EINVAL);
+        },
+    }
+}
+
+fn read_passphrase(prompt: &str) -> Option<String> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut stdin = stdin.lock();
+    let mut stdout = stdout.lock();
+
+    stdout.write_all(prompt.as_bytes()).unwrap();
+    stdout.flush().unwrap();
+
+    let passphrase = stdin.read_passwd(&mut stdout)
+                          .expect("Failed to read the passphrase");
+    stdout.write_all(b"\n").unwrap();
+
+    passphrase
+}
+
+fn source_directory(source_path: PathBuf) -> PathBuf {
+    if source_path.is_dir() {
+        source_path
+    } else {
+        error!("Source directory does not exist");
+        process::exit(libc::ENOTDIR);
+    }
+}
+
+fn source_file(source_path: PathBuf) -> PathBuf {
+    if source_path.is_file() {
+        source_path
+    } else {
+        error!("Source file does not exist");
+        process::exit(libc::ENOENT);
+    }
+}
+
+fn target_directory(source: &PathBuf, target_path: PathBuf) -> PathBuf {
+    if target_path.is_dir() {
+        let canonical_target_path = match target_path.canonicalize() {
+            Ok(path) => path,
+            Err(err) => {
+                error!("Target directory error: {}", err);
+                process::exit(libc::EIO);
             },
-            None => {
-                eprintln!("No passphrase provided");
-                process::exit(ExitStatus::INVALID_INPUT);
-            },
+        };
+        if canonical_target_path == *source {
+            error!("Source and target cannot be the same directory");
+            process::exit(libc::EINVAL);
         }
+        if canonical_target_path.starts_with(source) {
+            error!("Target cannot be under the source directory");
+            process::exit(libc::EINVAL);
+        }
+        if source.starts_with(&canonical_target_path) {
+            error!("Source cannot be under the target directory");
+            process::exit(libc::EINVAL);
+        }
+        canonical_target_path
+    } else {
+        error!("Target directory does not exist");
+        process::exit(libc::ENOTDIR);
     }
+}
 
-    fn read_passphrase(prompt: &str) -> Option<String> {
-        let stdin = io::stdin();
-        let stdout = io::stdout();
-        let mut stdin = stdin.lock();
-        let mut stdout = stdout.lock();
-
-        stdout.write_all(prompt.as_bytes()).unwrap();
-        stdout.flush().unwrap();
-
-        let passphrase = stdin.read_passwd(&mut stdout)
-                              .expect("Failed to read the passphrase");
-        stdout.write_all(b"\n").unwrap();
-
-        passphrase
+fn target_file(source: &PathBuf, mut target_path: PathBuf, force: bool) -> PathBuf {
+    if target_path.is_dir() {
+        target_path.push(source.file_name().unwrap());
     }
-
-    fn source_directory(source_path: PathBuf) -> PathBuf {
-        if source_path.is_dir() {
-            source_path
-        } else {
-            eprintln!("Source directory does not exist");
-            process::exit(ExitStatus::INVALID_ARGUMENT);
-        }
-    }
-
-    fn source_file(source_path: PathBuf) -> PathBuf {
-        if source_path.is_file() {
-            source_path
-        } else {
-            eprintln!("Source file does not exist");
-            process::exit(ExitStatus::INVALID_ARGUMENT);
-        }
-    }
-
-    fn target_directory(source: &PathBuf, target_path: PathBuf) -> PathBuf {
-        if target_path.is_dir() {
-            let canonical_target_path = target_path.canonicalize()
-                                                   .expect("Target path error");
-            if canonical_target_path == *source {
-                eprintln!("Source and target cannot be the same directory");
-                process::exit(ExitStatus::INVALID_ARGUMENT);
+    if target_path.is_file() {
+        let canonical_target_path = match target_path.canonicalize() {
+            Ok(path) => path,
+            Err(err) => {
+                error!("Target file error: {}", err);
+                process::exit(libc::EIO);
             }
-            if canonical_target_path.starts_with(&source) {
-                eprintln!("Target cannot be under the source directory");
-                process::exit(ExitStatus::INVALID_ARGUMENT);
-            }
-            if source.starts_with(&canonical_target_path) {
-                eprintln!("Source cannot be under the target directory");
-                process::exit(ExitStatus::INVALID_ARGUMENT);
-            }
-            canonical_target_path
-        } else {
-            eprintln!("Target directory does not exist");
-            process::exit(ExitStatus::INVALID_ARGUMENT);
+        };
+        if canonical_target_path == *source {
+            error!("Source and target cannot be the same file");
+            process::exit(libc::EINVAL);
         }
-    }
-
-    fn target_file(source: &PathBuf, mut target_path: PathBuf, force: bool) -> PathBuf {
-        if target_path.is_dir() {
-            target_path.push(source.file_name().unwrap());
+        if !force {
+            error!("Target file exists (use '-f' to overwrite')");
+            process::exit(libc::EINVAL);
         }
-        if target_path.is_file() {
-            let canonical_target_path = target_path.canonicalize().unwrap();
-            if canonical_target_path == *source {
-                eprintln!("Source and target cannot be the same file");
-                process::exit(ExitStatus::INVALID_ARGUMENT);
-            }
-            if !force {
-                eprintln!("Target file exists (use '-f' to overwrite')");
-                process::exit(ExitStatus::INVALID_ARGUMENT);
-            }
-            target_path
-        } else if target_path.is_dir() {
-            // if target_path + source.file_name() are still a directory
-            eprintln!("Target file points to a directory: {}",
-                      target_path.to_string_lossy());
-            process::exit(ExitStatus::INVALID_ARGUMENT);
-        } else {
-            target_path
-        }
+        target_path
+    } else if target_path.is_dir() {
+        // if target_path + source.file_name() is still a directory
+        error!("Target file points to a directory: {}",
+               target_path.to_string_lossy());
+        process::exit(libc::EISDIR);
+    } else {
+        target_path
     }
 }
