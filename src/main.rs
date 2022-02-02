@@ -22,20 +22,13 @@ mod single;
 
 use std::process;
 
-struct ExitStatus;
-impl ExitStatus {
-    pub const INVALID_ARGUMENT: i32 = 1;
-    pub const INVALID_INPUT: i32 = 2;
-    pub const IO_ERROR: i32 = 3;
-}
-
 use config::Config;
 use drive::Drive;
 
 fn main() {
     let config = Config::new();
 
-    if config.mount {
+    if config.mount() {
         let drive = Drive::new(config).unwrap();
         drive.mount();
     } else {

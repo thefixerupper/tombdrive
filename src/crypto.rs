@@ -14,14 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//!
-//! Provides [`EncryptionReader<T>`] and [`DecryptionReader<T>`] types used
-//! to translate from and to the encrypted container format.
-//!
-//! They transparently encrypt/decrypt data (as well as any associated
-//! attributes) from the backing stream.
-//!
-
 use std::io::{ self, ErrorKind, Read, Seek };
 
 use aes::{Aes128Ctr, BLOCK_SIZE as BLOCK_LEN};
@@ -139,7 +131,7 @@ impl<T: Read + Seek> EncryptionReader<T> {
         let attributes = Attributes::from(&mut stream)?;
         stream.seek_from_start(0)?;
 
-        let key = derive_key(&passphrase.raw, &attributes.salt);
+        let key = derive_key(&passphrase.as_ref(), &attributes.salt);
 
         let mut header = [0u8; HEADER_LEN];
 
@@ -238,7 +230,7 @@ impl<T: Read + Seek> DecryptionReader<T> {
 
         let counter = u128::from_be_bytes(counter_bytes);
         let attributes = Attributes { counter, salt };
-        let key = derive_key(&passphrase.raw, &salt);
+        let key = derive_key(&passphrase.as_ref(), &salt);
 
         Ok(DecryptionReader { attributes, cursor: 0, key, stream })
     }
@@ -401,7 +393,7 @@ pub mod tests {
     ///
     #[test]
     fn encryption_round_trip() {
-        let passphrase = Passphrase { raw: PASSPHRASE_BYTES.to_vec() };
+        let passphrase = Passphrase::from(PASSPHRASE_BYTES.to_vec());
         let ciphertext = encrypt(PLAINTEXT, &passphrase);
         let plaintext = decrypt(&ciphertext, &passphrase);
         assert_eq!(&plaintext[..], PLAINTEXT);
@@ -413,7 +405,7 @@ pub mod tests {
     ///
     #[test]
     fn partial_encryption() {
-        let passphrase = Passphrase { raw: PASSPHRASE_BYTES.to_vec() };
+        let passphrase = Passphrase::from(PASSPHRASE_BYTES.to_vec());
         let ciphertext = encrypt(PLAINTEXT, &passphrase);
 
         let plain_file = Cursor::new(PLAINTEXT);

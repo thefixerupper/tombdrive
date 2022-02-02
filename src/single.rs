@@ -42,7 +42,7 @@ const COPY_BUFFER_LEN: usize = 4 * 1024;
 /// Encrypt or decrypt a single file according to `config`.
 ///
 pub fn process_file(config: Config) -> Result<(), String> {
-    let source_file = match File::open(&config.source) {
+    let source_file = match File::open(config.source()) {
         Ok(file) => file,
         Err(err) => return Err(format!("Source error: {}", err)),
     };
@@ -52,8 +52,8 @@ pub fn process_file(config: Config) -> Result<(), String> {
         Err(err) => return Err(format!("Source error: {}", err)),
     };
 
-    if config.force {
-        if let Err(err) = fs::remove_file(&config.target) {
+    if config.force() {
+        if let Err(err) = fs::remove_file(config.target()) {
             match err.kind() {
                 ErrorKind::NotFound => (),
                 _ => return Err(format!("Target error: {}", err)),
@@ -63,7 +63,7 @@ pub fn process_file(config: Config) -> Result<(), String> {
 
     let target_file = match OpenOptions::new().write(true)
                                               .create_new(true)
-                                              .open(&config.target) {
+                                              .open(config.target()) {
         Ok(file) => file,
         Err(err) => return Err(format!("Target error: {}", err)),
     };
@@ -74,11 +74,11 @@ pub fn process_file(config: Config) -> Result<(), String> {
         return Ok(());
     }
 
-    match config.operation {
+    match config.operation() {
         Operation::Encrypt => encrypt_file(source_file, metadata,
-                                           target_file, &config.passphrase),
+                                           target_file, config.passphrase()),
         Operation::Decrypt => decrypt_file(source_file, metadata,
-                                           target_file, &config.passphrase),
+                                           target_file, config.passphrase()),
     }
 }
 
