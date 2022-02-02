@@ -680,6 +680,7 @@ impl Filesystem for Drive {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData
     ) {
+        assert!(offset >= 0);
         let offset = offset as usize;
 
         let handles = self.handles.read().unwrap();
@@ -697,29 +698,50 @@ impl Filesystem for Drive {
                 return;
             }
 
-            let mut data = vec![0u8; size as usize];
+            // TODO
+            // Reduce code duplication
+
             let result = match &handle.contents {
                 HandleContents::CiphertextFile(mutex) => {
                     let mut reader = mutex.lock().unwrap();
                     reader.seek_from_start(offset);
-                    reader.read_exact(&mut data[..])
+
+                    let remaining_len = reader.len()
+                                              .saturating_sub(offset)
+                                              .try_into()
+                                              .unwrap();
+                    let buffer_len = size.min(remaining_len);
+                    let mut buffer = vec![0; buffer_len.try_into().unwrap()];
+
+                    reader.read_exact(&mut buffer[..]).and(Ok(buffer))
                 },
                 HandleContents::PlaintextFile(mutex) => {
                     let mut reader = mutex.lock().unwrap();
                     reader.seek_from_start(offset);
-                    reader.read_exact(&mut data[..])
+
+                    let remaining_len = reader.len()
+                                              .saturating_sub(offset)
+                                              .try_into()
+                                              .unwrap();
+                    let buffer_len = size.min(remaining_len);
+                    let mut buffer = vec![0; buffer_len.try_into().unwrap()];
+
+                    reader.read_exact(&mut buffer[..]).and(Ok(buffer))
                 },
                 _ => unreachable!(),
             };
 
-            if let Err(err) = result {
-                error!("{}", err);
-                reply.error(libc::EIO);
-                return;
+            match result {
+                Ok(buffer) => {
+                    reply.data(&buffer);
+                    return;
+                },
+                Err(err) => {
+                    error!("{}", err);
+                    reply.error(libc::EIO);
+                    return;
+                },
             }
-
-            reply.data(&data);
-            return;
         }
     }
 
