@@ -17,16 +17,20 @@
 use std::collections::{ HashMap, HashSet };
 use std::ffi::{ CString, OsStr, OsString };
 use std::fs;
-use std::io;
+use std::io::{ self, Read };
 use std::mem::{ self, MaybeUninit };
 use std::path::PathBuf;
+use std::process;
 use std::sync::{ Arc, Mutex, RwLock, Weak };
 use std::time::{ Duration, SystemTime };
 
 use fuser::{ self, Filesystem, MountOption };
 use libc;
+use log::{ debug, info, error};
 
-use crate::config::Config;
+use crate::buffer::Buffer;
+use crate::config::{ Config, Operation, Passphrase };
+use crate::crypto::{ self, DecryptionReader, EncryptionReader };
 
 // ==================== //
 //     Type Aliases     //
@@ -39,6 +43,7 @@ type GroupID = libc::gid_t;
 type Size = libc::off_t;
 type Time = libc::time_t;
 type HandleID = u64;
+type InodeLock = RwLock<Inode>;
 
 // ================= //
 //     FILE TYPE     //
@@ -80,7 +85,6 @@ enum Permission {
 //     METADATA     //
 // ================ //
 
-/// Metadata
 #[derive(Debug)]
 struct Metadata {
     id: InodeID,
@@ -139,11 +143,24 @@ impl Metadata {
         }
     }
 
-    pub fn to_file_attr(&self) -> fuser::FileAttr {
+    pub fn to_file_attr(&self, operation: Operation) -> fuser::FileAttr {
         const E: SystemTime = SystemTime::UNIX_EPOCH;
+
+        let size = if self.file_type() == FileType::RegularFile {
+            let header = TryInto::<Size>::try_into(crypto::HEADER_LEN).unwrap();
+            match operation {
+                Operation::Encrypt if self.size == 0 => 0,
+                Operation::Encrypt => self.size.checked_add(header).unwrap(),
+                Operation::Decrypt if self.size > header => self.size - header,
+                Operation::Decrypt => 0,
+            }
+        } else {
+            self.size
+        };
+
         fuser::FileAttr {
             ino: self.id,
-            size: self.size as u64,
+            size: size as u64,
             blocks: 0,
             atime: E + Duration::from_secs(self.access_time as u64),
             mtime: E + Duration::from_secs(self.modification_time as u64),
@@ -165,10 +182,10 @@ impl TryFrom<&OsStr> for Metadata {
     type Error = ();
 
     fn try_from(path: &OsStr) -> Result<Self, ()> {
-        println!("Metadata::try_from()");
         let c_path = CString::new(path.to_str().unwrap()).unwrap();
         let mut stat = MaybeUninit::uninit();
-        if unsafe { libc::stat(c_path.as_ptr(), stat.as_mut_ptr()) } == -1 {
+        if unsafe { libc::lstat(c_path.as_ptr(), stat.as_mut_ptr()) } == -1 {
+            unsafe { libc::perror(std::ptr::null()) };
             return Err(());
         }
         let stat = unsafe { stat.assume_init() };
@@ -193,16 +210,15 @@ impl TryFrom<&OsStr> for Metadata {
 
 #[derive(Debug)]
 struct Inode {
-    children: HashMap<OsString, Arc<RwLock<Inode>>>,
+    children: HashMap<OsString, Arc<InodeLock>>,
     inodes: Weak<RwLock<Inodes>>,
     metadata: Metadata,
     path: PathBuf,
-    parent: Weak<RwLock<Inode>>,
+    parent: Weak<InodeLock>,
 }
 
 impl Inode {
     fn refresh(&mut self) -> Result<(), ()> {
-        println!("Inode::refresh()");
         let id = self.metadata.id;
         self.metadata = Metadata::try_from(self.path.as_os_str())?;
         self.metadata.id = id;
@@ -214,7 +230,6 @@ impl Inode {
     }
 
     fn load_children(&mut self) -> Result<(), ()> {
-        println!("Inode::load_children()");
         let mut remaining_names: HashSet<_> = self.children.keys()
                                                            .cloned()
                                                            .collect();
@@ -254,7 +269,6 @@ impl Inode {
     }
 
     fn add_child(&mut self, child: fs::DirEntry, mut metadata: Metadata) {
-        println!("Inode::add_child()");
         let inodes_arc = match Weak::upgrade(&self.inodes) {
             Some(inodes_arc) => inodes_arc,
             None => return,
@@ -282,7 +296,6 @@ impl Inode {
     }
 
     fn remove_child(&mut self, child_name: OsString) {
-        println!("Inode::remove_child()");
         let inode_arc = self.children.get(&child_name).unwrap();
         let inode = inode_arc.read().unwrap();
         let id = inode.metadata.id;
@@ -302,7 +315,6 @@ impl Inode {
 
 impl Drop for Inode {
     fn drop(&mut self) {
-        println!("Inode::drop()");
         if let Some(lock) = Weak::upgrade(&self.inodes) {
             let mut inodes = lock.write().unwrap();
             inodes.recycling.push(self.metadata.id);
@@ -316,16 +328,15 @@ impl Drop for Inode {
 
 #[derive(Debug)]
 struct Inodes {
-    entries: HashMap<InodeID, Arc<RwLock<Inode>>>,
+    entries: HashMap<InodeID, Arc<InodeLock>>,
     recycling: Vec<InodeID>,
-    root: Arc<RwLock<Inode>>,
+    root: Arc<InodeLock>,
 }
 
 impl Inodes {
     const ROOT_ID: InodeID = 1;
 
     fn new(mut root: Inode) -> Self {
-        println!("Inodes::new()");
         root.metadata.id = Self::ROOT_ID;
         let arc_root = Arc::new(RwLock::new(root));
         Self {
@@ -343,6 +354,8 @@ impl Inodes {
 #[derive(Debug)]
 enum HandleContents {
     Directory(Vec<Arc<RwLock<Inode>>>),
+    CiphertextFile(Mutex<DecryptionReader<fs::File>>),
+    PlaintextFile(Mutex<EncryptionReader<fs::File>>),
     NoContents,
 }
 
@@ -353,15 +366,7 @@ enum HandleContents {
 #[derive(Debug)]
 struct Handle {
     contents: HandleContents,
-    handles: Weak<RwLock<Handles>>,
-    id: HandleID,
-    inode: Arc<RwLock<Inode>>,
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        println!("Handle::drop()");
-    }
+    inode: Arc<InodeLock>,
 }
 
 // =============== //
@@ -371,22 +376,25 @@ impl Drop for Handle {
 #[derive(Debug)]
 struct Handles {
     entries: HashMap<HandleID, Arc<Handle>>,
-    handles: Weak<RwLock<Handles>>,
     recycling: Vec<HandleID>,
 }
 
 impl Handles {
     fn new() -> Self {
-        println!("Handles::new()");
         Self {
             entries: HashMap::new(),
-            handles: Weak::new(),
             recycling: Vec::new(),
         }
     }
 
-    fn create(&mut self, inode: &Arc<RwLock<Inode>>) -> HandleID {
-        println!("Handles::create()");
+    fn create(
+        &mut self,
+        inode: &Arc<RwLock<Inode>>,
+        config: &Config,
+    ) -> io::Result<HandleID> {
+        let operation = config.operation();
+        let passphrase = config.passphrase();
+
         let handle_id = match self.recycling.pop() {
             Some(id) => id,
             None => self.entries.len() as HandleID,
@@ -394,6 +402,7 @@ impl Handles {
 
         let inode_arc = Arc::clone(inode);
         let contents = {
+            let header = TryInto::<Size>::try_into(crypto::HEADER_LEN).unwrap();
             let inode = inode_arc.read().unwrap();
             match inode.metadata.file_type() {
                 FileType::Directory => {
@@ -401,28 +410,37 @@ impl Handles {
                                                             .map(|(_, c)| Arc::clone(c))
                                                             .collect())
                 },
+                FileType::RegularFile if operation == Operation::Decrypt
+                                      && inode.metadata.size() > header => {
+                    let file = fs::File::open(&inode.path)?;
+                    let buffer = Buffer::with_capacity(crypto::HEADER_LEN, file)?;
+                    let reader = DecryptionReader::new(buffer, passphrase)?;
+                    HandleContents::CiphertextFile(Mutex::new(reader))
+                },
+                FileType::RegularFile if operation == Operation::Encrypt
+                                      && inode.metadata.size() > 0 => {
+                    let file = fs::File::open(&inode.path)?;
+                    let buffer = Buffer::with_capacity(0, file)?;
+                    let reader = EncryptionReader::new(buffer, passphrase)?;
+                    HandleContents::PlaintextFile(Mutex::new(reader))
+                },
                 _ => {
                     HandleContents::NoContents
                 },
             }
         };
 
-        let handles = Weak::upgrade(&self.handles).unwrap();
-
         let handle = Handle {
             contents,
-            handles: Arc::downgrade(&handles),
-            id: handle_id,
             inode: inode_arc,
         };
 
         self.entries.insert(handle_id, Arc::new(handle));
 
-        handle_id
+        Ok(handle_id)
     }
 
     fn get(&self, id: HandleID) -> Option<Arc<Handle>> {
-        println!("Handles::get()");
         if let Some(handle) = self.entries.get(&id) {
             Some(Arc::clone(handle))
         } else {
@@ -431,7 +449,6 @@ impl Handles {
     }
 
     fn remove(&mut self, id: HandleID) {
-        println!("Handles::remove()");
         self.entries.remove(&id);
         self.recycling.push(id);
     }
@@ -444,25 +461,19 @@ impl Handles {
 #[derive(Debug)]
 pub struct Drive {
     config: Config,
-    handles: Arc<RwLock<Handles>>,
+    handles: RwLock<Handles>,
     inodes: Arc<RwLock<Inodes>>,
 }
 
 impl Drive {
     pub fn new(config: Config) -> Result<Self, ()> {
-        println!("Drive::new()");
-        let handles_arc = Arc::new(RwLock::new(Handles::new()));
-        {
-            let mut handles = handles_arc.write().unwrap();
-            handles.handles = Arc::downgrade(&handles_arc);
-        }
-
-        let root_metadata = Metadata::try_from(config.source.as_os_str())?;
+        let source = config.source().to_owned();
+        let root_metadata = Metadata::try_from(source.as_os_str())?;
         let root_inode = Inode {
             children: HashMap::new(),
             inodes: Weak::new(),
             metadata: root_metadata,
-            path: config.source.clone(),
+            path: source,
             parent: Weak::new(),
         };
         let inodes_arc = Arc::new(RwLock::new(Inodes::new(root_inode)));
@@ -473,18 +484,48 @@ impl Drive {
 
         Ok(Self {
             config,
-            handles: handles_arc,
+            handles: RwLock::new(Handles::new()),
             inodes: inodes_arc,
         })
     }
 
     pub fn mount(self) -> io::Result<()> {
-        println!("Drive::mount()");
-        let options = [
+        let mut options = vec![
             MountOption::FSName(clap::crate_name!().to_string()),
             MountOption::RO,
         ];
-        let target = self.config.target.clone();
+
+        if self.config.single_threaded() {
+            options.push(MountOption::Sync);
+        }
+
+        if !self.config.foreground() {
+            loop {
+                let pid = unsafe { libc::fork() };
+                if pid == - 1 {
+                    let err = io::Error::last_os_error();
+                    if let Some(code) = err.raw_os_error() {
+                        if code == libc::EAGAIN {
+                            continue;
+                        } else {
+                            error!("Could not fork");
+                            process::exit(code);
+                        }
+                    }
+                    error!("Could not fork (unknown error)");
+                    process::exit(-1);
+                }
+                if pid > 0 {
+                    info!("Creating a background process");
+                    process::exit(0); // foreground process exits
+                }
+                if pid == 0 {
+                    break;
+                }
+            }
+        }
+
+        let target = self.config.target().to_owned();
         fuser::mount2(self, target, &options)
     }
 }
@@ -497,7 +538,6 @@ impl Filesystem for Drive {
         _flags: i32,
         reply: fuser::ReplyOpen
     ) {
-        println!("Drive::opendir()");
         let inodes = self.inodes.read().unwrap();
         if let Some(inode_arc) = inodes.entries.get(&inode_id) {
             let inode_arc = Arc::clone(inode_arc);
@@ -509,8 +549,11 @@ impl Filesystem for Drive {
             }
             drop(inode);
             let mut handles = self.handles.write().unwrap();
-            let handle_id = handles.create(&inode_arc);
-            reply.opened(handle_id, 0);
+            if let Ok(handle_id) = handles.create(&inode_arc, &self.config) {
+                reply.opened(handle_id, 0);
+            } else {
+                reply.error(libc::EACCES);
+            };
         } else {
             reply.error(libc::ENOENT);
         }
@@ -524,18 +567,19 @@ impl Filesystem for Drive {
         offset: i64,
         mut reply: fuser::ReplyDirectory
     ) {
-        println!("Drive::readdir()");
-        let offset = dbg!(offset) as usize;
+        let offset = offset as usize;
 
-        let handles = self.handles.write().unwrap();
+        let handles = self.handles.read().unwrap();
         if let Some(handle) = handles.get(handle_id) {
             let inode = handle.inode.read().unwrap();
             let inode_check = inode.metadata.id == inode_id;
 
             if !inode_check {
                 reply.error(libc::EINVAL);
+                return;
+            }
 
-            } else if let HandleContents::Directory(children) = &handle.contents {
+            if let HandleContents::Directory(children) = &handle.contents {
                 let parent_inode_arc = Weak::upgrade(&inode.parent);
                 let parent_inode_arc = if parent_inode_arc.is_some() {
                     parent_inode_arc.unwrap()
@@ -560,9 +604,8 @@ impl Filesystem for Drive {
                         child_name_string = OsString::from("..");
                         child_name = child_name_string.as_os_str();
                     }
-                    dbg!(&child_name);
-                    if reply.add(dbg!(child.metadata.id),
-                                 dbg!((idx + 1) as i64),
+                    if reply.add(child.metadata.id,
+                                 (idx + 1) as i64,
                                  child.metadata.to_fuser_file_type(),
                                  child_name) {
                         reply.ok();
@@ -587,7 +630,109 @@ impl Filesystem for Drive {
         _flags: i32,
         reply: fuser::ReplyEmpty
     ) {
-        println!("Drive::releasedir()");
+        let mut handles = self.handles.write().unwrap();
+        if let Some(handle) = handles.get(handle_id) {
+            let inode = handle.inode.read().unwrap();
+            let inode_check = inode.metadata.id == inode_id;
+            drop(inode);
+
+            if !inode_check {
+                reply.error(libc::EINVAL);
+            } else {
+                handles.remove(handle_id);
+                reply.ok();
+            }
+        } else {
+            reply.error(libc::EINVAL);
+        }
+    }
+
+    fn open(
+        &mut self,
+        _: &fuser::Request<'_>,
+        inode_id: InodeID,
+        _flags: i32,
+        reply: fuser::ReplyOpen
+    ) {
+        let inodes = self.inodes.read().unwrap();
+        if let Some(inode_arc) = inodes.entries.get(&inode_id) {
+            let inode_arc = Arc::clone(inode_arc);
+            drop(inodes);
+            let mut handles = self.handles.write().unwrap();
+            if let Ok(handle_id) = handles.create(&inode_arc, &self.config) {
+                reply.opened(handle_id, 0);
+            } else {
+                reply.error(libc::EACCES);
+            }
+        } else {
+            reply.error(libc::ENOENT);
+        }
+    }
+
+    fn read(
+        &mut self,
+        _: &fuser::Request<'_>,
+        inode_id: InodeID,
+        handle_id: HandleID,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyData
+    ) {
+        let offset = offset as usize;
+
+        let handles = self.handles.read().unwrap();
+        if let Some(handle) = handles.get(handle_id) {
+            let inode = handle.inode.read().unwrap();
+            let inode_check = inode.metadata.id == inode_id;
+
+            if !inode_check {
+                reply.error(libc::EINVAL);
+                return;
+            }
+
+            if let HandleContents::NoContents = &handle.contents {
+                reply.data(&[]);
+                return;
+            }
+
+            let mut data = vec![0u8; size as usize];
+            let result = match &handle.contents {
+                HandleContents::CiphertextFile(mutex) => {
+                    let mut reader = mutex.lock().unwrap();
+                    reader.seek_from_start(offset);
+                    reader.read_exact(&mut data[..])
+                },
+                HandleContents::PlaintextFile(mutex) => {
+                    let mut reader = mutex.lock().unwrap();
+                    reader.seek_from_start(offset);
+                    reader.read_exact(&mut data[..])
+                },
+                _ => unreachable!(),
+            };
+
+            if let Err(err) = result {
+                error!("{}", err);
+                reply.error(libc::EIO);
+                return;
+            }
+
+            reply.data(&data);
+            return;
+        }
+    }
+
+    fn release(
+        &mut self,
+        _: &fuser::Request<'_>,
+        inode_id: InodeID,
+        handle_id: HandleID,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty
+    ) {
         let mut handles = self.handles.write().unwrap();
         if let Some(handle) = handles.get(handle_id) {
             let inode = handle.inode.read().unwrap();
@@ -612,7 +757,6 @@ impl Filesystem for Drive {
         name: &OsStr,
         reply: fuser::ReplyEntry
     ) {
-        println!("Drive::lookup()");
         let inodes = self.inodes.write().unwrap();
         if let Some(parent_inode_arc) = inodes.entries.get(&parent_id) {
             let parent_inode_arc = Arc::clone(parent_inode_arc);
@@ -624,7 +768,8 @@ impl Filesystem for Drive {
             }
             if let Some(child_inode_arc) = parent_inode.children.get(name) {
                 let child_inode = child_inode_arc.read().unwrap();
-                let child_attr = child_inode.metadata.to_file_attr();
+                let operation = self.config.operation();
+                let child_attr = child_inode.metadata.to_file_attr(operation);
                 reply.entry(&Duration::from_secs(1), &child_attr, 0);
             } else {
                 reply.error(libc::ENOENT);
@@ -638,11 +783,11 @@ impl Filesystem for Drive {
         inode_id: InodeID,
         reply: fuser::ReplyAttr
     ) {
-        println!("Drive::getattr()");
         let inodes = self.inodes.read().unwrap();
         if let Some(inode_arc) = inodes.entries.get(&inode_id) {
             let inode = inode_arc.read().unwrap();
-            reply.attr(&Duration::from_secs(1), &inode.metadata.to_file_attr())
+            reply.attr(&Duration::from_secs(1),
+                       &inode.metadata.to_file_attr(self.config.operation()))
         } else {
             reply.error(libc::ENOENT);
         }
