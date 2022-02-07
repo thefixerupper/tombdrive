@@ -15,17 +15,18 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
-use std::mem::MaybeUninit;
-use std::path::PathBuf;
+use std::os::linux::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, SystemTime};
 
-use fuser::{self, FileType, Filesystem, MountOption, ReplyAttr, ReplyData,
-            ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request};
+use fuser::{self, FileAttr, FileType, Filesystem, MountOption, ReplyAttr,
+            ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+            Request};
 use libc;
 use log::{debug, error, info, trace};
 
@@ -37,12 +38,14 @@ use crate::crypto::{self, DecryptionReader, EncryptionReader};
 //     Type Aliases     //
 // ==================== //
 
-type InodeID = libc::ino_t;
-type LinkCount = libc::nlink_t;
-type OwnerID = libc::uid_t;
-type GroupID = libc::gid_t;
-type Size = libc::off_t;
-type Time = libc::time_t;
+type InodeID = u64;
+type Mode = u32;
+type LinkCount = u64;
+type OwnerID = u32;
+type GroupID = u32;
+type Size = u64;
+type BlockSize = u64;
+type Time = i64;
 type HandleID = u64;
 type InodeLock = RwLock<Inode>;
 
@@ -76,19 +79,12 @@ enum Permission {
 #[derive(Debug)]
 struct Metadata {
     id: InodeID,
-    mode: u32,
-    link_count: LinkCount,
-    owner_id: OwnerID,
-    group_id: GroupID,
-    size: Size,
-    access_time: Time,
-    modification_time: Time,
-    change_time: Time,
+    inner: fs::Metadata,
 }
 
 impl Metadata {
     pub fn file_type(&self) -> FileType {
-        match self.mode & libc::S_IFMT {
+        match self.mode() & libc::S_IFMT {
             libc::S_IFBLK => FileType::BlockDevice,
             libc::S_IFCHR => FileType::CharDevice,
             libc::S_IFDIR => FileType::Directory,
@@ -100,66 +96,98 @@ impl Metadata {
         }
     }
 
+    #[inline]
+    pub fn id(&self) -> InodeID { self.id }
+
+    #[inline]
+    pub fn set_id(&mut self, id: InodeID) { self.id = id }
+
+    #[inline]
+    pub fn size(&self) -> Size { self.inner.st_size() }
+
+    #[inline]
+    pub fn accessed(&self) -> Time { self.inner.st_atime() }
+
+    #[inline]
+    pub fn modified(&self) -> Time { self.inner.st_mtime() }
+
+    #[inline]
+    pub fn changed(&self) -> Time { self.inner.st_ctime() }
+
+    #[inline]
+    pub fn created(&self) -> Time { self.inner.st_mtime() }
+
+    #[inline]
+    pub fn mode(&self) -> Mode { self.inner.st_mode() }
+
+    #[inline]
+    pub fn link_count(&self) -> LinkCount { self.inner.st_nlink() }
+
+    #[inline]
+    pub fn owner_id(&self) -> OwnerID { self.inner.st_uid() }
+
+    #[inline]
+    pub fn group_id(&self) -> GroupID { self.inner.st_gid() }
+
+    #[inline]
+    pub fn block_size(&self) -> BlockSize { self.inner.st_blksize() }
+
+    #[inline]
     pub fn has_permission(&self, permission: Permission) -> bool {
-        0 < permission as u32 & self.mode
+        0 < permission as u32 & self.mode()
     }
 
-    pub fn to_file_attr(&self, operation: Operation) -> fuser::FileAttr {
-        const E: SystemTime = SystemTime::UNIX_EPOCH;
-
+    pub fn to_file_attr(&self, operation: Operation) -> FileAttr {
         let size = if self.file_type() == FileType::RegularFile {
-            let header = TryInto::<Size>::try_into(crypto::HEADER_LEN).unwrap();
+            let header = crypto::HEADER_LEN.try_into().unwrap();
             match operation {
-                Operation::Encrypt if self.size == 0 => 0,
-                Operation::Encrypt => self.size.checked_add(header).unwrap(),
-                Operation::Decrypt if self.size > header => self.size - header,
-                Operation::Decrypt => 0,
+                Operation::Encrypt if self.size() == 0 => { 0 },
+                Operation::Encrypt => {
+                    self.size().checked_add(header).unwrap()
+                },
+                Operation::Decrypt if self.size() > header => {
+                    self.size() - header
+                },
+                Operation::Decrypt => { 0 },
             }
         } else {
-            self.size
+            self.size()
         };
 
-        fuser::FileAttr {
-            ino: self.id,
-            size: size as u64,
+        #[inline]
+        fn to_system_time(t: Time) -> SystemTime {
+            const E: SystemTime = SystemTime::UNIX_EPOCH;
+            E + Duration::from_secs(t.try_into().unwrap())
+        }
+
+        FileAttr {
+            ino: self.id(),
+            size,
             blocks: 0,
-            atime: E + Duration::from_secs(self.access_time as u64),
-            mtime: E + Duration::from_secs(self.modification_time as u64),
-            ctime: E + Duration::from_secs(self.change_time as u64),
-            crtime: E + Duration::from_secs(self.modification_time as u64),
+            atime: to_system_time(self.accessed()),
+            mtime: to_system_time(self.modified()),
+            ctime: to_system_time(self.changed()),
+            crtime: to_system_time(self.created()),
             kind: self.file_type(),
-            perm: self.mode as u16,
-            nlink: self.link_count as u32,
-            uid: self.owner_id,
-            gid: self.group_id,
+            perm: self.mode() as u16,
+            nlink: self.link_count().try_into().unwrap(),
+            uid: self.owner_id(),
+            gid: self.group_id(),
             rdev: 0,
-            blksize: 0,
+            blksize: self.block_size().try_into().unwrap(),
             flags: 0,
         }
     }
 }
 
-impl TryFrom<&OsStr> for Metadata {
+impl TryFrom<&Path> for Metadata {
     type Error = io::Error;
 
-    fn try_from(path: &OsStr) -> Result<Self, Self::Error> {
-        let c_path = CString::new(path.to_str().unwrap()).unwrap();
-        let mut stat = MaybeUninit::uninit();
-        if unsafe { libc::lstat(c_path.as_ptr(), stat.as_mut_ptr()) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        let stat = unsafe { stat.assume_init() };
-
+    fn try_from(path: &Path) -> io::Result<Self> {
+        let metadata = path.symlink_metadata()?;
         Ok(Self {
-            id: stat.st_ino,
-            mode: stat.st_mode,
-            link_count: stat.st_nlink,
-            owner_id: stat.st_uid,
-            group_id: stat.st_gid,
-            size: stat.st_size,
-            access_time: stat.st_atime,
-            modification_time: stat.st_mtime,
-            change_time: stat.st_mtime,
+            id: metadata.st_ino(),
+            inner: metadata,
         })
     }
 }
@@ -179,9 +207,9 @@ struct Inode {
 
 impl Inode {
     fn refresh(&mut self) -> io::Result<()> {
-        let id = self.metadata.id;
-        self.metadata = Metadata::try_from(self.path.as_os_str())?;
-        self.metadata.id = id;
+        let id = self.metadata.id();
+        self.metadata = self.path.as_path().try_into()?;
+        self.metadata.set_id(id);
 
         match self.metadata.file_type() {
             FileType::Directory => self.load_children(),
@@ -198,7 +226,7 @@ impl Inode {
         for child in children {
             let child = child?;
             let child_name = child.file_name();
-            let child_metadata = Metadata::try_from(child.path().as_os_str())?;
+            let child_metadata: Metadata = child.path().as_path().try_into()?;
 
             if let Some(current_inode) = self.children.get(&child_name) {
                 let current_inode = current_inode.read().unwrap();
@@ -232,10 +260,10 @@ impl Inode {
         } else {
             Inodes::ROOT_ID + inodes.entries.len() as InodeID
         };
-        let self_inode = inodes.entries.get(&self.metadata.id).unwrap();
+        let self_inode = inodes.entries.get(&self.metadata.id()).unwrap();
         let self_inode = Arc::downgrade(self_inode);
 
-        metadata.id = id;
+        metadata.set_id(id);
         let inode_arc = Arc::new(RwLock::new(Inode {
             children: HashMap::new(),
             inodes: Weak::clone(&self.inodes),
@@ -251,7 +279,7 @@ impl Inode {
     fn remove_child(&mut self, child_name: OsString) {
         let inode_arc = self.children.get(&child_name).unwrap();
         let inode = inode_arc.read().unwrap();
-        let id = inode.metadata.id;
+        let id = inode.metadata.id();
         drop(inode);
 
         let inodes_arc = match Weak::upgrade(&self.inodes) {
@@ -268,10 +296,10 @@ impl Inode {
 
 impl Drop for Inode {
     fn drop(&mut self) {
-        trace!("Dropping inode: {}", self.metadata.id);
+        trace!("Dropping inode: {}", self.metadata.id());
         if let Some(lock) = Weak::upgrade(&self.inodes) {
             let mut inodes = lock.write().unwrap();
-            inodes.recycling.push(self.metadata.id);
+            inodes.recycling.push(self.metadata.id());
         }
     }
 }
@@ -291,7 +319,7 @@ impl Inodes {
     const ROOT_ID: InodeID = 1;
 
     fn new(mut root: Inode) -> Self {
-        root.metadata.id = Self::ROOT_ID;
+        root.metadata.set_id(Self::ROOT_ID);
         let arc_root = Arc::new(RwLock::new(root));
         Self {
             entries: HashMap::from([(Self::ROOT_ID, Arc::clone(&arc_root))]),
@@ -362,7 +390,7 @@ impl Handles {
 
         let inode_arc = Arc::clone(inode);
         let contents = {
-            let header = TryInto::<Size>::try_into(crypto::HEADER_LEN).unwrap();
+            let header = crypto::HEADER_LEN.try_into().unwrap();
             let inode = inode_arc.read().unwrap();
             match inode.metadata.file_type() {
                 FileType::Directory => {
@@ -371,14 +399,14 @@ impl Handles {
                                                             .collect())
                 },
                 FileType::RegularFile if operation == Operation::Decrypt
-                                      && inode.metadata.size > header => {
+                                      && inode.metadata.size() > header => {
                     let file = fs::File::open(&inode.path)?;
                     let buffer = Buffer::with_capacity(crypto::HEADER_LEN, file)?;
                     let reader = DecryptionReader::new(buffer, passphrase)?;
                     HandleContents::CiphertextFile(Mutex::new(reader))
                 },
                 FileType::RegularFile if operation == Operation::Encrypt
-                                      && inode.metadata.size > 0 => {
+                                      && inode.metadata.size() > 0 => {
                     let file = fs::File::open(&inode.path)?;
                     let buffer = Buffer::with_capacity(0, file)?;
                     let reader = EncryptionReader::new(buffer, passphrase)?;
@@ -430,7 +458,7 @@ impl Drive {
         debug!("Creating a new drive");
 
         let source = config.source().to_owned();
-        let root_metadata = Metadata::try_from(source.as_os_str())?;
+        let root_metadata = source.as_path().try_into()?;
         let root_inode = Inode {
             children: HashMap::new(),
             inodes: Weak::new(),
@@ -534,7 +562,7 @@ impl Filesystem for Drive {
         let handles = self.handles.read().unwrap();
         if let Some(handle) = handles.get(handle_id) {
             let inode = handle.inode.read().unwrap();
-            let inode_check = inode.metadata.id == inode_id;
+            let inode_check = inode.metadata.id() == inode_id;
 
             if !inode_check {
                 reply.error(libc::EINVAL);
@@ -566,7 +594,7 @@ impl Filesystem for Drive {
                         child_name_string = OsString::from("..");
                         child_name = child_name_string.as_os_str();
                     }
-                    if reply.add(child.metadata.id,
+                    if reply.add(child.metadata.id(),
                                  (idx + 1) as i64,
                                  child.metadata.file_type(),
                                  child_name) {
@@ -595,7 +623,7 @@ impl Filesystem for Drive {
         let mut handles = self.handles.write().unwrap();
         if let Some(handle) = handles.get(handle_id) {
             let inode = handle.inode.read().unwrap();
-            let inode_check = inode.metadata.id == inode_id;
+            let inode_check = inode.metadata.id() == inode_id;
             drop(inode);
 
             if !inode_check {
@@ -648,7 +676,7 @@ impl Filesystem for Drive {
         let handles = self.handles.read().unwrap();
         if let Some(handle) = handles.get(handle_id) {
             let inode = handle.inode.read().unwrap();
-            let inode_check = inode.metadata.id == inode_id;
+            let inode_check = inode.metadata.id() == inode_id;
 
             if !inode_check {
                 reply.error(libc::EINVAL);
@@ -720,7 +748,7 @@ impl Filesystem for Drive {
         let mut handles = self.handles.write().unwrap();
         if let Some(handle) = handles.get(handle_id) {
             let inode = handle.inode.read().unwrap();
-            let inode_check = inode.metadata.id == inode_id;
+            let inode_check = inode.metadata.id() == inode_id;
             drop(inode);
 
             if !inode_check {
