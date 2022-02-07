@@ -14,17 +14,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//!
 //! Provides functionality to operate on a single file.
-//!
 
-use std::fs::{ self, File, Metadata, OpenOptions };
-use std::io::{ BufWriter, ErrorKind, Read, Write };
+use std::fs::{self, File, Metadata, OpenOptions};
+use std::io::{self, BufWriter, ErrorKind, Read, Write};
+
+use log::{debug, error, trace};
 
 use crate::buffer::Buffer;
 use crate::config::{ Config, Operation, Passphrase };
 use crate::crypto::{ EncryptionReader, DecryptionReader };
 
+// ================= //
+//     Constants     //
+// ================= //
 
 /// The size of the encryption reader buffer (encryption buffer reads the
 /// entire file to calculate the hash, so bigger buffer can be more useful)
@@ -37,40 +40,38 @@ const DEC_BUFFER_LEN: usize = 8 * 1024;
 /// EncryptionReader/DecryptionReader into the target file
 const COPY_BUFFER_LEN: usize = 4 * 1024;
 
+// ================== //
+//     Public API     //
+// ================== //
 
-///
 /// Encrypt or decrypt a single file according to `config`.
-///
-pub fn process_file(config: Config) -> Result<(), String> {
-    let source_file = match File::open(config.source()) {
-        Ok(file) => file,
-        Err(err) => return Err(format!("Source error: {}", err)),
-    };
+pub fn process_file(config: Config) -> io::Result<()> {
+    debug!("Processing a single file");
 
-    let metadata = match source_file.metadata() {
-        Ok(data) => data,
-        Err(err) => return Err(format!("Source error: {}", err)),
-    };
+    trace!("Opening the source file {:?}", config.source());
+    let source_file = File::open(config.source())?;
+
+    trace!("Querying source file metadata");
+    let metadata = source_file.metadata()?;
 
     if config.force() {
         if let Err(err) = fs::remove_file(config.target()) {
-            match err.kind() {
-                ErrorKind::NotFound => (),
-                _ => return Err(format!("Target error: {}", err)),
+            if err.kind() != ErrorKind::NotFound {
+                error!("Target file error");
+                return Err(err);
             }
         }
     }
 
-    let target_file = match OpenOptions::new().write(true)
-                                              .create_new(true)
-                                              .open(config.target()) {
-        Ok(file) => file,
-        Err(err) => return Err(format!("Target error: {}", err)),
-    };
+    trace!("Opening the target file: {:?}", config.target());
+    let target_file = OpenOptions::new().write(true)
+                                        .create_new(true)
+                                        .open(config.target())?;
 
     // special case: empty files are encrypted/decrypted into empty files
     // and that's what we already have
     if metadata.len() == 0 {
+        debug!("Nothing to do as the source file size is zero");
         return Ok(());
     }
 
@@ -82,70 +83,63 @@ pub fn process_file(config: Config) -> Result<(), String> {
     }
 }
 
+// ======================== //
+//     Helper Functions     //
+// ======================== //
 
-///
 /// Set up buffers and cryptographic reader for encryption and then
 /// copy the data over into the target file.
-///
-fn encrypt_file(source: File, meta: Metadata, target: File, passphrase: &Passphrase)
-                -> Result<(), String> {
+fn encrypt_file(
+    source: File,
+    meta: Metadata,
+    target: File,
+    passphrase: &Passphrase
+) -> io::Result<()> {
+    debug!("Encrypting a single file");
     let capacity = (meta.len() as usize).min(ENC_BUFFER_LEN);
-    let source_buffer = match Buffer::with_capacity(capacity, source) {
-        Ok(buf) => buf,
-        Err(err) => return Err(format!("Encryption buffer error: {}", err)),
-    };
-    let source_reader = match EncryptionReader::new(source_buffer, passphrase){
-        Ok(reader) => reader,
-        Err(err) => return Err(format!("Encryption reader error: {}", err)),
-    };
+    let source_buffer = Buffer::with_capacity(capacity, source)?;
+    let source_reader = EncryptionReader::new(source_buffer, passphrase)?;
     let target_writer = BufWriter::new(target);
 
     copy_file(source_reader, target_writer)
 }
 
-
-///
 /// Set up buffers and cryptographic reader for decryption and then
 /// copy the data over into the target file.
-///
-fn decrypt_file(source: File, meta: Metadata, target: File, passphrase: &Passphrase)
-                -> Result<(), String> {
+fn decrypt_file(
+    source: File,
+    meta: Metadata,
+    target: File,
+    passphrase: &Passphrase
+) -> io::Result<()> {
+    debug!("Decrypting a single file");
     let capacity = (meta.len() as usize).min(DEC_BUFFER_LEN);
-    let source_buffer = match Buffer::with_capacity(capacity, source) {
-        Ok(buf) => buf,
-        Err(err) => return Err(format!("Decryption buffer error: {}", err)),
-    };
-    let source_reader = match DecryptionReader::new(source_buffer, passphrase){
-        Ok(reader) => reader,
-        Err(err) => return Err(format!("Decryption reader error: {}", err)),
-    };
+    let source_buffer = Buffer::with_capacity(capacity, source)?;
+    let source_reader = DecryptionReader::new(source_buffer, passphrase)?;
     let target_writer = BufWriter::new(target);
 
     copy_file(source_reader, target_writer)
 }
 
-
-///
 /// Do the actual copying between source and target buffered reader/writer.
-///
-fn copy_file(mut source: impl Read, mut target: impl Write) -> Result<(), String> {
+fn copy_file(mut source: impl Read, mut target: impl Write) -> io::Result<()> {
+    debug!("Copying data from source to target");
     let mut buffer = vec![0u8; COPY_BUFFER_LEN];
     loop {
+        trace!("Reading data from source");
         let copied = match source.read(&mut buffer) {
             Ok(0) => break,
             Ok(len) => len,
             Err(err) => if err.kind() == ErrorKind::Interrupted {
                 continue;
             } else {
-                return Err(format!("Copying error: {}", err));
+                return Err(err);
             },
         };
-        if let Err(err) = target.write_all(&buffer[..copied]) {
-            return Err(format!("Writing error: {}", err));
-        }
+        trace!("Writing data to into target");
+        target.write_all(&buffer[..copied])?;
     }
-    if let Err(err) = target.flush() {
-        return Err(format!("Failed to flush written data: {}", err));
-    }
+    trace!("Flushing target");
+    target.flush()?;
     Ok(())
 }
