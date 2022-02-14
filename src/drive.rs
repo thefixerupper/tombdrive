@@ -49,33 +49,16 @@ type Time = i64;
 type HandleID = u64;
 type InodeLock = RwLock<Inode>;
 
-// ================== //
-//     PERMISSION     //
-// ================== //
-
-#[repr(u32)]
-#[derive(Clone, Copy)]
-#[derive(Debug)]
-#[derive(PartialEq, Eq)]
-enum Permission {
-    SetUserID = libc::S_ISUID,
-    SetGroupID = libc::S_ISGID,
-    Sticky = libc::S_ISVTX,
-    OwnerRead = libc::S_IRUSR,
-    OwnerWrite = libc::S_IWUSR,
-    OwnerExecute = libc::S_IXUSR,
-    GroupRead = libc::S_IRGRP,
-    GroupWrite = libc::S_IWGRP,
-    GroupExecute = libc::S_IXGRP,
-    OthersRead = libc::S_IROTH,
-    OthersWrite = libc::S_IWOTH,
-    OthersExecute = libc::S_IXOTH,
-}
-
 // ================ //
 //     METADATA     //
 // ================ //
 
+/// [`Metadata`] is for the most part a thin wrapper around [`fs::Metadata`]
+/// with some additional functionality, such as storing Tomb Drive specific
+/// inode ID.
+///
+/// It also provides conversion functionality from [`Path`] and into
+/// [`FileType`] and [`FileAttr`].
 #[derive(Debug)]
 struct Metadata {
     id: InodeID,
@@ -115,7 +98,7 @@ impl Metadata {
     pub fn changed(&self) -> Time { self.inner.st_ctime() }
 
     #[inline]
-    pub fn created(&self) -> Time { self.inner.st_mtime() }
+    pub fn created(&self) -> Time { 0 }
 
     #[inline]
     pub fn mode(&self) -> Mode { self.inner.st_mode() }
@@ -132,12 +115,10 @@ impl Metadata {
     #[inline]
     pub fn block_size(&self) -> BlockSize { self.inner.st_blksize() }
 
-    #[inline]
-    pub fn has_permission(&self, permission: Permission) -> bool {
-        0 < permission as u32 & self.mode()
-    }
-
+    /// Extract [`FileAttr`] out of [`Metadata`] based on the [`Operation`]
+    /// that the file system is currently providing.
     pub fn to_file_attr(&self, operation: Operation) -> FileAttr {
+        trace!("Converting metadata to attributes");
         let size = if self.file_type() == FileType::RegularFile {
             let header = crypto::HEADER_LEN.try_into().unwrap();
             match operation {
@@ -183,6 +164,9 @@ impl Metadata {
 impl TryFrom<&Path> for Metadata {
     type Error = io::Error;
 
+    /// Create new [`Metadata`] for the provided `path`.
+    ///
+    /// This function will not traverse symlinks.
     fn try_from(path: &Path) -> io::Result<Self> {
         let metadata = path.symlink_metadata()?;
         Ok(Self {
@@ -196,6 +180,11 @@ impl TryFrom<&Path> for Metadata {
 //     INODE     //
 // ============= //
 
+/// [`Inode`] represents a single file of the filesystem.
+///
+/// Inodes are mostly wrapped in [`RwLock`] as [`InodeLock`] and are
+/// additionally wrapped in [`Arc`] or [`Weak`] (for child and parent inodes
+/// respectively).
 #[derive(Debug)]
 struct Inode {
     children: HashMap<OsString, Arc<InodeLock>>,
@@ -206,6 +195,8 @@ struct Inode {
 }
 
 impl Inode {
+    /// Refresh the contents of [`Inode`]. This will reload children for
+    /// directories and clear children (if any) for any other file type.
     fn refresh(&mut self) -> io::Result<()> {
         let id = self.metadata.id();
         self.metadata = self.path.as_path().try_into()?;
@@ -217,6 +208,7 @@ impl Inode {
         }
     }
 
+    /// Populate [`Inode`] with children inodes (for directory inodes)
     fn load_children(&mut self) -> io::Result<()> {
         let mut remaining_names: HashSet<_> = self.children.keys()
                                                            .cloned()
@@ -226,7 +218,7 @@ impl Inode {
         for child in children {
             let child = child?;
             let child_name = child.file_name();
-            let child_metadata: Metadata = child.path().as_path().try_into()?;
+            let child_metadata = Metadata::try_from(child.path().as_path())?;
 
             if let Some(current_inode) = self.children.get(&child_name) {
                 let current_inode = current_inode.read().unwrap();
@@ -249,6 +241,8 @@ impl Inode {
         Ok(())
     }
 
+    /// Create a new [`Inode`] described by [`fs::DirEntry`] `child` and
+    /// its associated `metadata`, and add it to the drive.
     fn add_child(&mut self, child: fs::DirEntry, mut metadata: Metadata) {
         let inodes_arc = match Weak::upgrade(&self.inodes) {
             Some(inodes_arc) => inodes_arc,
@@ -276,6 +270,10 @@ impl Inode {
         self.children.insert(child.file_name(), inode_arc);
     }
 
+    /// Remove child from the drive.
+    ///
+    /// The inode ID recycling will be taken care of by `drop()` once
+    /// all the `Arc`s go out of scope.
     fn remove_child(&mut self, child_name: OsString) {
         let inode_arc = self.children.get(&child_name).unwrap();
         let inode = inode_arc.read().unwrap();
@@ -295,6 +293,7 @@ impl Inode {
 }
 
 impl Drop for Inode {
+    /// Once inode is freed, recycle its ID.
     fn drop(&mut self) {
         trace!("Dropping inode: {}", self.metadata.id());
         if let Some(lock) = Weak::upgrade(&self.inodes) {
@@ -308,6 +307,10 @@ impl Drop for Inode {
 //     INODES     //
 // ============== //
 
+/// [`Inodes`] is a container that holds individual [`Inode`] entries.
+///
+/// It also provides direct access to the root inode as well as the
+/// recycled inode IDs.
 #[derive(Debug)]
 struct Inodes {
     entries: HashMap<InodeID, Arc<InodeLock>>,
@@ -318,6 +321,7 @@ struct Inodes {
 impl Inodes {
     const ROOT_ID: InodeID = 1;
 
+    /// Create new [`Inodes`] with the specified `inode` as a root.
     fn new(mut root: Inode) -> Self {
         root.metadata.set_id(Self::ROOT_ID);
         let arc_root = Arc::new(RwLock::new(root));
@@ -329,29 +333,38 @@ impl Inodes {
     }
 }
 
-// ======================= //
-//     HANDLE CONTENTS     //
-// ======================= //
+// ====================== //
+//     HANDLE CONTENT     //
+// ====================== //
 
+/// Each [`Handle`] can either contain children inodes (if it's a directory)
+/// a reader that provides on-the-fly encryption/decryption (regular, non-empty
+/// files), or it can have no content at all (e.g. a symlink or an empty file).
 #[derive(Debug)]
-enum HandleContents {
-    Directory(Vec<Arc<RwLock<Inode>>>),
+enum HandleContent {
+    Directory(Vec<Arc<InodeLock>>),
     CiphertextFile(Mutex<DecryptionReader<fs::File>>),
     PlaintextFile(Mutex<EncryptionReader<fs::File>>),
-    NoContents,
+    NoContent,
 }
 
 // ============== //
 //     HANDLE     //
 // ============== //
 
+
+/// [`Handle`] represents an open file.
+///
+/// It can have contents (such as children inodes for a directory) that gets
+/// associated with it when the handle is created.
 #[derive(Debug)]
 struct Handle {
-    contents: HandleContents,
+    contents: HandleContent,
     inode: Arc<InodeLock>,
 }
 
 impl Drop for Handle {
+    /// Used only for debugging
     fn drop(&mut self) {
         trace!("Dropping handle");
     }
@@ -361,6 +374,9 @@ impl Drop for Handle {
 //     HANDLES     //
 // =============== //
 
+/// [`Handles`] holds the individual [`Handle`]s as well as a vector
+/// `recycling` of individual [`HandleID`]s that is used when recycling
+/// no IDs that are no longer opened.
 #[derive(Debug)]
 struct Handles {
     entries: HashMap<HandleID, Arc<Handle>>,
@@ -368,6 +384,7 @@ struct Handles {
 }
 
 impl Handles {
+    /// Create a new instance of [`Handles`].
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -375,6 +392,8 @@ impl Handles {
         }
     }
 
+    /// Create a new [`Handle`] for the specified `inode` according to `config`
+    /// and return its newly assigned [`HandleID`].
     fn create(
         &mut self,
         inode: &Arc<RwLock<Inode>>,
@@ -394,26 +413,26 @@ impl Handles {
             let inode = inode_arc.read().unwrap();
             match inode.metadata.file_type() {
                 FileType::Directory => {
-                    HandleContents::Directory(inode.children.iter()
-                                                            .map(|(_, c)| Arc::clone(c))
-                                                            .collect())
+                    HandleContent::Directory(inode.children.iter()
+                                                           .map(|(_, c)| Arc::clone(c))
+                                                           .collect())
                 },
                 FileType::RegularFile if operation == Operation::Decrypt
                                       && inode.metadata.size() > header => {
                     let file = fs::File::open(&inode.path)?;
                     let buffer = Buffer::with_capacity(crypto::HEADER_LEN, file)?;
                     let reader = DecryptionReader::new(buffer, passphrase)?;
-                    HandleContents::CiphertextFile(Mutex::new(reader))
+                    HandleContent::CiphertextFile(Mutex::new(reader))
                 },
                 FileType::RegularFile if operation == Operation::Encrypt
                                       && inode.metadata.size() > 0 => {
                     let file = fs::File::open(&inode.path)?;
                     let buffer = Buffer::with_capacity(0, file)?;
                     let reader = EncryptionReader::new(buffer, passphrase)?;
-                    HandleContents::PlaintextFile(Mutex::new(reader))
+                    HandleContent::PlaintextFile(Mutex::new(reader))
                 },
                 _ => {
-                    HandleContents::NoContents
+                    HandleContent::NoContent
                 },
             }
         };
@@ -428,6 +447,7 @@ impl Handles {
         Ok(handle_id)
     }
 
+    /// Retrieve a [`Handle`] with the specified `id`.
     fn get(&self, id: HandleID) -> Option<Arc<Handle>> {
         if let Some(handle) = self.entries.get(&id) {
             Some(Arc::clone(handle))
@@ -436,6 +456,7 @@ impl Handles {
         }
     }
 
+    /// Remove the [`Handle`] with the specified `id`.
     fn remove(&mut self, id: HandleID) {
         self.entries.remove(&id);
         self.recycling.push(id);
@@ -446,6 +467,10 @@ impl Handles {
 //     DRIVE     //
 // ============= //
 
+/// [`Drive`] is where the entire filesystem comes together.
+///
+/// Structurally it's quite simple, holding only configuration details,
+/// opened handles, and known inodes.
 #[derive(Debug)]
 pub struct Drive {
     config: Config,
@@ -454,6 +479,7 @@ pub struct Drive {
 }
 
 impl Drive {
+    /// Create a new [`Drive`] according to the specified `config`.
     pub fn new(config: Config) -> io::Result<Self> {
         debug!("Creating a new drive");
 
@@ -479,14 +505,19 @@ impl Drive {
         })
     }
 
+    /// Mount [`Drive`] onto the target mountpoint specified in
+    /// the configuration provided when this instance of `Drive` was created.
     pub fn mount(self) -> io::Result<()> {
         let mut options = vec![
             MountOption::FSName(clap::crate_name!().to_string()),
             MountOption::RO,
+            MountOption::DefaultPermissions,
         ];
 
         if self.config.single_threaded() {
             options.push(MountOption::Sync);
+        } else {
+            options.push(MountOption::Async);
         }
 
         if !self.config.foreground() {
@@ -520,7 +551,12 @@ impl Drive {
     }
 }
 
+// ======================================== //
+//     DRIVE: Fuse Filesystem Functions     //
+// ======================================== //
+
 impl Filesystem for Drive {
+    /// Open a directory and retrieve the associated handle.
     fn opendir(
         &mut self,
         _: &Request<'_>,
@@ -549,6 +585,8 @@ impl Filesystem for Drive {
         }
     }
 
+    /// Read from the directory described
+    /// by `inode_id` and `handle_id`.
     fn readdir(
         &mut self,
         _: &Request<'_>,
@@ -569,7 +607,7 @@ impl Filesystem for Drive {
                 return;
             }
 
-            if let HandleContents::Directory(children) = &handle.contents {
+            if let HandleContent::Directory(children) = &handle.contents {
                 let parent_inode_arc = Weak::upgrade(&inode.parent);
                 let parent_inode_arc = if parent_inode_arc.is_some() {
                     parent_inode_arc.unwrap()
@@ -612,6 +650,8 @@ impl Filesystem for Drive {
         }
     }
 
+    /// Close the handle for the directory described
+    /// by `inode_id` and `handle_id`.
     fn releasedir(
         &mut self,
         _: &Request<'_>,
@@ -637,6 +677,7 @@ impl Filesystem for Drive {
         }
     }
 
+    /// Open a file and retrieve its associate handle.
     fn open(
         &mut self,
         _: &Request<'_>,
@@ -659,6 +700,7 @@ impl Filesystem for Drive {
         }
     }
 
+    /// Read from the file described by `indoe_id` and `handle_id`.
     fn read(
         &mut self,
         _: &Request<'_>,
@@ -683,7 +725,7 @@ impl Filesystem for Drive {
                 return;
             }
 
-            if let HandleContents::NoContents = &handle.contents {
+            if let HandleContent::NoContent = &handle.contents {
                 reply.data(&[]);
                 return;
             }
@@ -692,7 +734,7 @@ impl Filesystem for Drive {
             // Reduce code duplication
 
             let result = match &handle.contents {
-                HandleContents::CiphertextFile(mutex) => {
+                HandleContent::CiphertextFile(mutex) => {
                     let mut reader = mutex.lock().unwrap();
                     reader.seek_from_start(offset);
 
@@ -705,7 +747,7 @@ impl Filesystem for Drive {
 
                     reader.read_exact(&mut buffer[..]).and(Ok(buffer))
                 },
-                HandleContents::PlaintextFile(mutex) => {
+                HandleContent::PlaintextFile(mutex) => {
                     let mut reader = mutex.lock().unwrap();
                     reader.seek_from_start(offset);
 
@@ -735,6 +777,7 @@ impl Filesystem for Drive {
         }
     }
 
+    /// Close the file described by `indoe_id` and `handle_id`.
     fn release(
         &mut self,
         _: &Request<'_>,
@@ -762,6 +805,7 @@ impl Filesystem for Drive {
         }
     }
 
+    /// Lookup a directory (`parent_id`) entry by `name`.
     fn lookup(
         &mut self,
         _: &Request<'_>,
@@ -789,6 +833,7 @@ impl Filesystem for Drive {
         }
     }
 
+    /// Get attributes for the inode described by `inode_id`.
     fn getattr(
         &mut self,
         _: &Request<'_>,

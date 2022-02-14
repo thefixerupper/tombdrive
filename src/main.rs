@@ -48,10 +48,10 @@ fn main() {
             },
         };
         if let Err(err) = drive.mount() {
-            error!("Could not mount a new drive: {}", err);
+            error!("Could not mount Tomb Drive: {}", err);
             process::exit(1);
         }
-        info!("The drive has been unmounted");
+        info!("Tomb Drive has been unmounted");
     } else {
         if let Err(err) = single::process_file(config) {
             error!("Could not process a single file: {}", err);
