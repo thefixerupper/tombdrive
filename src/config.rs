@@ -141,8 +141,8 @@ impl Config {
         let args = parse_arguments();
 
         let logger_env = match args.occurrences_of(VERBOSE) {
-            1 => env_logger::Env::default().filter("debug"),
-            2 => env_logger::Env::default().filter("trace"),
+            1 => env_logger::Env::default().default_filter_or("debug"),
+            2 => env_logger::Env::default().default_filter_or("trace"),
             _ => env_logger::Env::default().default_filter_or("info"),
         };
         env_logger::Builder::from_env(logger_env).init();
