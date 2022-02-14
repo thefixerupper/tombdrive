@@ -22,7 +22,7 @@
 
 use std::io::{self, ErrorKind, Read, Seek};
 
-use aes::{Aes128Ctr, BLOCK_SIZE as BLOCK_LEN};
+use aes::{Aes256Ctr, BLOCK_SIZE as BLOCK_LEN};
 use aes::cipher::{NewCipher, StreamCipher};
 use aes::cipher::generic_array::GenericArray;
 use hmac::Hmac;
@@ -47,7 +47,7 @@ const SALT_LEN: usize = 16;
 pub const HEADER_LEN: usize = COUNTER_LEN + SALT_LEN;
 
 /// The number of bytes in a key
-const KEY_LEN: usize = 16;
+const KEY_LEN: usize = 32;
 
 /// The number of derivation rounds
 const KEY_ROUNDS: u32 = 10_000;
@@ -77,11 +77,18 @@ impl Attributes {
     ///
     /// Internally, this hashes the stream and splits the resulting hash into
     /// a reproducible counter and salt.
-    pub fn from<T: Read + Seek>(stream: &mut Buffer<T>) -> io::Result<Attributes> {
+    pub fn new<T>(
+        stream: &mut Buffer<T>,
+        passphrase: &Passphrase,
+    ) -> io::Result<Attributes>
+    where
+        T: Read + Seek,
+    {
         trace!("Creating new attributes by hashing the stream");
 
         stream.seek_from_start(0)?;
         let mut hasher = Sha256::new();
+        let mut empty = true;
 
         let mut buffer = [0u8; 32];
         loop {
@@ -92,6 +99,7 @@ impl Attributes {
                 Ok(n) => {
                     let buffer_slice = &buffer[..n];
                     hasher.update(buffer_slice);
+                    empty = false;
                 }
                 Err(error) => {
                     if error.kind() != ErrorKind::Interrupted {
@@ -100,6 +108,8 @@ impl Attributes {
                 }
             }
         }
+        assert!(!empty);
+        hasher.update(passphrase.as_ref());
         let hash = hasher.finalize();
 
         let mut counter_bytes = [0u8; COUNTER_LEN];
@@ -246,7 +256,7 @@ where
             return Err(io::Error::new(ErrorKind::Other, "Empty stream"));
         }
 
-        let attributes = Attributes::from(&mut stream)?;
+        let attributes = Attributes::new(&mut stream, passphrase)?;
         stream.seek_from_start(0)?;
 
         let key = derive_key(&passphrase.as_ref(), &attributes.salt);
@@ -373,7 +383,7 @@ where
     // cipher
     let key_ga = GenericArray::from_slice(key);
     let counter_ga = GenericArray::from_slice(&counter_bytes);
-    let mut cipher = Aes128Ctr::new(key_ga, counter_ga);
+    let mut cipher = Aes256Ctr::new(key_ga, counter_ga);
 
     // number of bytes remaining in the stream
     let bytes_remaining = stream.len() - aligned_cursor;
