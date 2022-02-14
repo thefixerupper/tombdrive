@@ -1,4 +1,4 @@
-# This file is part of Tombdrive
+# This file is part of Tomb Drive
 #
 # Copyright 2022 Martin Furman
 #
@@ -14,5 +14,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Cargo.lock
 /target
