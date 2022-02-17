@@ -21,7 +21,7 @@ description = "A simple cryptographic toolkit with a virtual encryption filesyst
 repository = "https://github.com/thefixerupper/tombdrive"
 keywords = ["cli", "encryption", "filesystem", "fs", "fuse"]
 categories = ["command-line-utilities", "cryptography", "filesystem"]
-version = "0.2.1"
+version = "0.3.0"
 license = "Apache-2.0"
 
 publish = false
@@ -30,12 +30,16 @@ edition = "2021"
 
 [dependencies]
 aes = { version = "0.7", features = ["ctr"] }
-clap = { version = "3.0", features = ["cargo", "wrap_help"] }
+argon2 = { version = "0.3", features = ["parallel"] }
+clap = { version = "3.1", features = ["cargo", "wrap_help"] }
 env_logger = { version = "0.9" }
 fuser = { version = "0.10", features = ["abi-7-31"] }
-hmac = { version = "0.12", default_features = false }
 libc = { version = "0.2" }
 log = { version = "0.4" }
-pbkdf2 = { version = "0.10", default_features = false }
 sha2 = { version = "0.10", default_features = false }
 termion = { version = "1.5" }
+
+# Optimise key derivation to get a better idea how long it will take
+# in the release build
+[profile.dev.package.argon2]
+opt-level = 3

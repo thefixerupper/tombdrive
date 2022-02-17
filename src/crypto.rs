@@ -25,9 +25,9 @@ use std::io::{self, ErrorKind, Read, Seek};
 use aes::{Aes256Ctr, BLOCK_SIZE as BLOCK_LEN};
 use aes::cipher::{NewCipher, StreamCipher};
 use aes::cipher::generic_array::GenericArray;
-use hmac::Hmac;
+use argon2::{self, Argon2};
+use argon2::password_hash::{PasswordHasher, SaltString};
 use log::{debug, trace};
-use pbkdf2;
 use sha2::{Digest, Sha256};
 
 use crate::buffer::Buffer;
@@ -49,8 +49,14 @@ pub const HEADER_LEN: usize = COUNTER_LEN + SALT_LEN;
 /// The number of bytes in a key
 const KEY_LEN: usize = 32;
 
+/// The memory used for key derivation
+const KEY_MEMORY: u32 = 1024 * 1024;
+
+/// The degree of parallelism used for key derivation
+const KEY_PARALLELISM: u32 = 16;
+
 /// The number of derivation rounds
-const KEY_ROUNDS: u32 = 10_000;
+const KEY_ROUNDS: u32 = 16;
 
 // The maximum number of bytes to work on per encryption/decryption iteration
 const MAX_BYTES_PER_READ: usize = 4096;
@@ -341,10 +347,25 @@ fn align_to_block(cursor: usize) -> usize {
 /// Key is derived based on the `passphrase` and and `salt`.
 fn derive_key(passphrase: &[u8], salt: &[u8]) -> [u8; KEY_LEN] {
     trace!("Deriving a key");
-    let mut hash = [0u8; KEY_LEN];
-    pbkdf2::pbkdf2::<Hmac<Sha256>>(passphrase, salt, KEY_ROUNDS, &mut hash);
+    let mut params = argon2::ParamsBuilder::new();
+    if params.m_cost(KEY_MEMORY).is_err() ||
+       params.p_cost(KEY_PARALLELISM).is_err() ||
+       params.t_cost(KEY_ROUNDS).is_err() ||
+       params.output_len(KEY_LEN).is_err() {
+           panic!("Cannot set derivation parameters");
+    }
+    let hasher = Argon2::new(
+        argon2::Algorithm::Argon2d,
+        argon2::Version::V0x13,
+        params.params().unwrap(),
+    );
+    let salt_str = SaltString::b64_encode(salt).unwrap();
+    trace!("Starting key derivation");
+    let hash = hasher.hash_password(passphrase, &salt_str)
+                     .expect("Cannot derive key");
+    trace!("Key derivation finished");
     let mut key = [0u8; KEY_LEN];
-    key.copy_from_slice(&hash[..KEY_LEN]);
+    key.copy_from_slice(hash.hash.unwrap().as_bytes());
     key
 }
 
