@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::ptr;
 
-use clap::{App, Arg, ArgGroup, ArgMatches};
+use clap::{Arg, ArgGroup, ArgMatches, Command};
 use log::{debug, error, trace};
 use termion::input::TermRead;
 
@@ -266,7 +266,7 @@ impl Config {
 
 /// Parse command line arguments.
 fn parse_arguments() -> ArgMatches {
-    App::new(clap::crate_name!())
+    Command::new(clap::crate_name!())
         .about(clap::crate_description!())
         .version(clap::crate_version!())
         .after_help(concat!("If <passfile> is not provided, ",
@@ -448,7 +448,7 @@ fn source_file(source_path: PathBuf) -> PathBuf {
 }
 
 /// Make sure that the target directory exists.
-fn target_directory(source: &PathBuf, target_path: PathBuf) -> PathBuf {
+fn target_directory(source: &Path, target_path: PathBuf) -> PathBuf {
     if target_path.is_dir() {
         let canonical_target_path = match target_path.canonicalize() {
             Ok(path) => path,
@@ -480,7 +480,7 @@ fn target_directory(source: &PathBuf, target_path: PathBuf) -> PathBuf {
 ///
 /// If the target points to a directory, the path will be retargetted
 /// to a file of the same name as the source file in the target directory.
-fn target_file(source: &PathBuf, mut target_path: PathBuf, force: bool) -> PathBuf {
+fn target_file(source: &Path, mut target_path: PathBuf, force: bool) -> PathBuf {
     if target_path.is_dir() {
         let source_file_name = source.file_name().unwrap();
         trace!("Target is a directory, will target file '{:?}' instead.",

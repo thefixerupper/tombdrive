@@ -180,7 +180,7 @@ where
 
         let counter = u128::from_be_bytes(counter_bytes);
         let attributes = Attributes { counter, salt };
-        let key = derive_key(&passphrase.as_ref(), &salt);
+        let key = derive_key(passphrase.as_ref(), &salt);
 
         Ok(DecryptionReader { attributes, cursor: 0, key, stream })
     }
@@ -210,7 +210,7 @@ where
         trace!("Reading {} bytes of decrypted data", out.len());
 
         // if no `out` or we are past the length of file, return 0
-        if out.len() == 0 || self.cursor >= self.len() {
+        if out.is_empty() || self.cursor >= self.len() {
             return Ok(0);
         }
 
@@ -265,7 +265,7 @@ where
         let attributes = Attributes::new(&mut stream, passphrase)?;
         stream.seek_from_start(0)?;
 
-        let key = derive_key(&passphrase.as_ref(), &attributes.salt);
+        let key = derive_key(passphrase.as_ref(), &attributes.salt);
 
         let mut header = [0u8; HEADER_LEN];
 
@@ -303,7 +303,7 @@ where
         trace!("Reading {} bytes of encrypted data", out.len());
 
         // if no `out` or we're past the end of file, return 0
-        if out.len() == 0 || self.cursor >= self.len() {
+        if out.is_empty() || self.cursor >= self.len() {
             return Ok(0);
         }
 

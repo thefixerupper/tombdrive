@@ -27,7 +27,6 @@ use std::time::{Duration, SystemTime};
 use fuser::{self, FileAttr, FileType, Filesystem, MountOption, ReplyAttr,
             ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
             Request};
-use libc;
 use log::{debug, error, info, trace};
 
 use crate::buffer::Buffer;
@@ -203,9 +202,10 @@ impl Inode {
         self.metadata.set_id(id);
 
         match self.metadata.file_type() {
-            FileType::Directory => self.load_children(),
-            _ => Ok(self.children.clear()),
+            FileType::Directory => self.load_children()?,
+            _ => self.children.clear(),
         }
+        Ok(())
     }
 
     /// Populate [`Inode`] with children inodes (for directory inodes)
@@ -449,11 +449,7 @@ impl Handles {
 
     /// Retrieve a [`Handle`] with the specified `id`.
     fn get(&self, id: HandleID) -> Option<Arc<Handle>> {
-        if let Some(handle) = self.entries.get(&id) {
-            Some(Arc::clone(handle))
-        } else {
-            None
-        }
+        self.entries.get(&id).map(Arc::clone)
     }
 
     /// Remove the [`Handle`] with the specified `id`.
@@ -569,7 +565,7 @@ impl Filesystem for Drive {
             let inode_arc = Arc::clone(inode_arc);
             let mut inode = inode_arc.write().unwrap();
             drop(inodes);
-            if let Err(_) = inode.refresh() {
+            if inode.refresh().is_err() {
                 reply.error(libc::EACCES);
                 return;
             }
@@ -608,11 +604,12 @@ impl Filesystem for Drive {
             }
 
             if let HandleContent::Directory(children) = &handle.contents {
-                let parent_inode_arc = Weak::upgrade(&inode.parent);
-                let parent_inode_arc = if parent_inode_arc.is_some() {
-                    parent_inode_arc.unwrap()
-                } else {
-                    Arc::clone(&handle.inode)
+                let parent_inode_arc = {
+                    if let Some(parent_inode_arc) = Weak::upgrade(&inode.parent) {
+                        parent_inode_arc
+                    } else {
+                        Arc::clone(&handle.inode)
+                    }
                 };
                 let dot_files = [&handle.inode, &parent_inode_arc];
                 let children_iter = dot_files.into_iter().chain(children.iter());
@@ -766,12 +763,10 @@ impl Filesystem for Drive {
             match result {
                 Ok(buffer) => {
                     reply.data(&buffer);
-                    return;
                 },
                 Err(err) => {
                     error!("{}", err);
                     reply.error(libc::EIO);
-                    return;
                 },
             }
         }
@@ -818,7 +813,7 @@ impl Filesystem for Drive {
             let parent_inode_arc = Arc::clone(parent_inode_arc);
             drop(inodes);
             let mut parent_inode = parent_inode_arc.write().unwrap();
-            if let Err(_) = parent_inode.refresh() {
+            if parent_inode.refresh().is_err() {
                 reply.error(libc::EACCES);
                 return;
             }
