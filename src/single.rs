@@ -98,10 +98,10 @@ fn encrypt_file(
     debug!("Encrypting a single file");
     let capacity = (meta.len() as usize).min(ENC_BUFFER_LEN);
     let source_buffer = Buffer::with_capacity(capacity, source)?;
-    let source_reader = EncryptionReader::new(source_buffer, passphrase)?;
-    let target_writer = BufWriter::new(target);
+    let mut source_reader = EncryptionReader::new(source_buffer, passphrase)?;
+    let mut target_writer = BufWriter::new(target);
 
-    copy_file(source_reader, target_writer)
+    copy_file(&mut source_reader, &mut target_writer)
 }
 
 /// Set up buffers and cryptographic reader for decryption and then
@@ -115,14 +115,14 @@ fn decrypt_file(
     debug!("Decrypting a single file");
     let capacity = (meta.len() as usize).min(DEC_BUFFER_LEN);
     let source_buffer = Buffer::with_capacity(capacity, source)?;
-    let source_reader = DecryptionReader::new(source_buffer, passphrase)?;
-    let target_writer = BufWriter::new(target);
+    let mut source_reader = DecryptionReader::new(source_buffer, passphrase)?;
+    let mut target_writer = BufWriter::new(target);
 
-    copy_file(source_reader, target_writer)
+    copy_file(&mut source_reader, &mut target_writer)
 }
 
 /// Do the actual copying between source and target buffered reader/writer.
-fn copy_file(mut source: impl Read, mut target: impl Write) -> io::Result<()> {
+fn copy_file(source: &mut impl Read, target: &mut impl Write) -> io::Result<()> {
     debug!("Copying data from source to target");
     let mut buffer = vec![0u8; COPY_BUFFER_LEN];
     loop {
@@ -142,4 +142,31 @@ fn copy_file(mut source: impl Read, mut target: impl Write) -> io::Result<()> {
     trace!("Flushing target");
     target.flush()?;
     Ok(())
+}
+
+// ============= //
+//     Tests     //
+// ============= //
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use io::Cursor;
+
+    const SAMPLE_TEXT: &[u8] = concat!(
+        "This is your last chance. After this, there is no turning back. ",
+        "You take the blue pill - the story ends, you wake up in your bed ",
+        "and believe whatever you want to believe. You take the red pill - ",
+        "you stay in Wonderland and I show you how deep the rabbit-hole goes."
+    ).as_bytes();
+
+    #[test]
+    fn test_fn_copy_file() {
+        let mut src = Cursor::new(SAMPLE_TEXT.to_vec());
+        let mut tgt = Cursor::new(Vec::<u8>::new());
+        copy_file(&mut src, &mut tgt).unwrap();
+        assert_eq!(src, tgt);
+    }
+
 }

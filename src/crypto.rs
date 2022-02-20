@@ -446,9 +446,9 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use io::Cursor;
-
     use super::*;
+
+    use io::Cursor;
 
     const PLAINTEXT: &[u8] = concat!(
         "It was a bright cold day in April, and the clocks were striking ",
@@ -523,5 +523,32 @@ pub mod tests {
             enc_reader.read_exact(&mut part).unwrap();
             assert_ne!(&part[..], &ciphertext[i.0..(i.0 + i.1)]);
         }
+    }
+
+    #[test]
+    fn test_fn_align_to_block() {
+        let pairs: [(usize, usize); 6] = [
+            (0, 0), (13, 0),  (16, 16),
+            (31, 16), (32, 32), (40, 32)
+        ];
+
+        for (src, tgt) in pairs.into_iter() {
+            assert_eq!(align_to_block(src), tgt);
+        }
+    }
+
+    #[test]
+    fn test_fn_derive_key() {
+        const PASSPHRASE: &[u8] = b"Power, time, gravity, love.";
+        const SALT: &[u8; SALT_LEN] = b"DM: Cloud Atlas!";
+        const KEY: [u8; KEY_LEN] = [
+            36, 134, 156, 32, 216, 255, 107, 7, 161, 114, 237,
+            12, 167, 73, 113, 88, 125, 167, 142, 88, 21, 11,
+            128, 86, 108, 91, 123, 210, 46, 161, 193, 201
+        ];
+
+        let key = derive_key(PASSPHRASE, SALT);
+
+        assert_eq!(key, KEY);
     }
 }

@@ -111,3 +111,30 @@ where
         Ok(bytes_read)
     }
 }
+
+// ============= //
+//     Tests     //
+// ============= //
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use io::Cursor;
+
+    const CONTENT: &[u8] = b"Your lack of fear is based on your ignorance.";
+
+    #[test]
+    fn seeking() {
+        let stream = Cursor::new(CONTENT);
+        let mut buffer = Buffer::with_capacity(CONTENT.len(), stream).unwrap();
+
+        let mut out = [0u8; 4];
+        buffer.read_exact(&mut out).unwrap();
+        assert_eq!(out, CONTENT[..4]);
+
+        buffer.seek_from_start(13).unwrap();
+        buffer.read_exact(&mut out).unwrap();
+        assert_eq!(out, CONTENT[13..][..4])
+    }
+}
