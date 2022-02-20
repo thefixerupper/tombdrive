@@ -50,7 +50,7 @@ pub const HEADER_LEN: usize = COUNTER_LEN + SALT_LEN;
 const KEY_LEN: usize = 32;
 
 /// The memory used for key derivation
-const KEY_MEMORY: u32 = 1024 * 1024;
+const KEY_MEMORY: u32 = 256 * 1024;
 
 /// The degree of parallelism used for key derivation
 const KEY_PARALLELISM: u32 = 16;

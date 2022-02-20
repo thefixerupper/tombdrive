@@ -844,4 +844,30 @@ impl Filesystem for Drive {
             reply.error(libc::ENOENT);
         }
     }
+
+    /// Read a symbolic link.
+    fn readlink(
+        &mut self,
+        _: &Request<'_>,
+        inode_id: u64,
+        reply: ReplyData
+    ) {
+        let inodes = self.inodes.read().unwrap();
+        if let Some(inode_arc) = inodes.entries.get(&inode_id) {
+            let inode = inode_arc.read().unwrap();
+            if inode.metadata.file_type() != FileType::Symlink {
+                reply.error(libc::EINVAL);
+                return;
+            }
+            match fs::read_link(&inode.path) {
+                Ok(target) => reply.data(target.as_os_str()
+                                               .to_str()
+                                               .unwrap()
+                                               .as_bytes()),
+                Err(_) => reply.error(libc::EIO),
+            }
+        } else {
+            reply.error(libc::ENOENT);
+        }
+    }
 }
