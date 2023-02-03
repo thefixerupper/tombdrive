@@ -1,6 +1,7 @@
-# This file is part of Tomb Drive
+# SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2022 Martin Furman
+# TombDrive: A cryptographic toolkit
+# Copyright 2022-2023 Martin Furman
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,17 +17,15 @@
 
 [package]
 name = "tombdrive"
-authors = ["Martin Furman"]
 description = "A simple cryptographic toolkit with a virtual encryption filesystem"
 repository = "https://github.com/thefixerupper/tombdrive"
-keywords = ["cli", "encryption", "filesystem", "fs", "fuse"]
-categories = ["command-line-utilities", "cryptography", "filesystem"]
-version = "0.3.3"
+version = "0.3.4"
+
+authors = ["Martin Furman"]
 license = "Apache-2.0"
 
-publish = false
-
 edition = "2021"
+publish = false
 
 [dependencies]
 aes = { version = "0.7", features = ["ctr"] }
